@@ -74,10 +74,27 @@ does the arithmetic. The design first runs in an RTL simulator, where every
 program must produce the same results as on the ISA simulator. It is then
 synthesized onto an FPGA, and eventually manufactured as silicon.
 
+## Getting Started
+
+Install the `titania` command:
+
+```console
+cargo install --path cli
+```
+
+Then chat with the model, which is downloaded on first use:
+
+```console
+titania run
+```
+
+`titania models` lists the supported models, whether they are downloaded, and
+where they are stored. `titania fetch` downloads a model ahead of time.
+
 ## Milestones
 
-- [ ] Model runs on current hardware
-- [ ] CubeCL backend emits Titania ISA
+- [x] Model runs on CPU
+- [ ] Compiler emits Titania ISA
 - [ ] Model runs on ISA simulator
 - [ ] Model runs on RTL simulator
 - [ ] Model runs on FPGA
