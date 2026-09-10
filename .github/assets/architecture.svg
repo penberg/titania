@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="640" height="476" viewBox="0 0 640 476" role="img" aria-labelledby="title desc">
   <title id="title">Titania architecture</title>
-  <desc id="desc">The model, written in CubeCL, is compiled to the Titania ISA. The GPU, written in Verilog, executes the ISA and is synthesized to an FPGA and then an ASIC. The reference simulator defines the semantics of the ISA, and the GPU is verified against it.</desc>
+  <desc id="desc">The model, a transformer, is compiled to the Titania ISA. The GPU, an RTL design, executes the ISA and is synthesized to an FPGA and then an ASIC. The ISA simulator defines the semantics of the ISA, and the GPU is verified against it.</desc>
   <style>
     svg {
       --fg: #1f2328;
@@ -78,22 +78,22 @@
   <!-- Model -->
   <rect class="box" x="40" y="24" width="200" height="64" rx="10"/>
   <text class="title" x="140" y="51">Model</text>
-  <text class="sub" x="140" y="70">CubeCL</text>
+  <text class="sub" x="140" y="70">transformer</text>
 
   <!-- ISA -->
   <rect class="isa" x="40" y="144" width="200" height="64" rx="10"/>
   <text class="title" x="140" y="171">Titania ISA</text>
   <text class="sub" x="140" y="190">instruction set</text>
 
-  <!-- Simulator -->
+  <!-- ISA simulator -->
   <rect class="sim" x="400" y="144" width="200" height="64" rx="10"/>
-  <text class="title" x="500" y="171">Simulator</text>
+  <text class="title" x="500" y="171">ISA Simulator</text>
   <text class="sub" x="500" y="190">reference implementation</text>
 
   <!-- GPU -->
   <rect class="box" x="40" y="288" width="200" height="64" rx="10"/>
   <text class="title" x="140" y="315">GPU</text>
-  <text class="sub" x="140" y="334">Verilog</text>
+  <text class="sub" x="140" y="334">RTL</text>
 
   <!-- FPGA, then ASIC -->
   <rect class="box" x="90" y="408" width="100" height="44" rx="22"/>
