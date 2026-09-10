@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="476" viewBox="0 0 640 476" role="img" aria-labelledby="title desc">
+  <title id="title">Titania architecture</title>
+  <desc id="desc">The model, written in CubeCL, is compiled to the Titania ISA. The GPU, written in Verilog, executes the ISA and is synthesized to an FPGA and then an ASIC. The reference simulator defines the semantics of the ISA, and the GPU is verified against it.</desc>
+  <style>
+    svg {
+      --fg: #1f2328;
+      --muted: #59636e;
+      --line: #d1d9e0;
+      --box: #f6f8fa;
+      --edge: #818b98;
+      --accent: #0969da;
+      --accent-bg: #ddf4ff;
+      --sim: #8250df;
+      --sim-bg: #fbefff;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --fg: #f0f6fc;
+        --muted: #9198a1;
+        --line: #3d444d;
+        --box: #151b23;
+        --edge: #7d8590;
+        --accent: #4493f8;
+        --accent-bg: #0d2847;
+        --sim: #ab7df8;
+        --sim-bg: #26173f;
+      }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; }
+    .box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+    .isa { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 1.75; }
+    .sim { fill: var(--sim-bg); stroke: var(--sim); stroke-width: 1.5; }
+    .title { fill: var(--fg); font-size: 15px; font-weight: 600; text-anchor: middle; }
+    .sub { fill: var(--muted); font-size: 12.5px; text-anchor: middle; }
+    .pill { fill: var(--fg); font-size: 13.5px; font-weight: 600; text-anchor: middle; }
+    .edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+    .edge-sim { fill: none; stroke: var(--sim); stroke-width: 1.5; }
+    .dashed { stroke-dasharray: 5 4; }
+    .head { fill: var(--edge); }
+    .head-sim { fill: var(--sim); }
+    .label { fill: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+    .label-sim { fill: var(--sim); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+    .divider { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+    .zone { fill: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 1.5px; text-anchor: end; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 L2.5,5 Z"/>
+    </marker>
+    <marker id="arrow-sim" viewBox="0 0 10 10" refX="10" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path class="head-sim" d="M0,0 L10,5 L0,10 L2.5,5 Z"/>
+    </marker>
+  </defs>
+
+  <!-- Software / hardware boundary -->
+  <line class="divider" x1="40" y1="256" x2="600" y2="256"/>
+  <text class="zone" x="600" y="248">SOFTWARE</text>
+  <text class="zone" x="600" y="274">HARDWARE</text>
+
+  <!-- Edges -->
+  <line class="edge" x1="140" y1="88" x2="140" y2="143" marker-end="url(#arrow)"/>
+  <text class="label" x="152" y="120">compile</text>
+
+  <line class="edge" x1="140" y1="208" x2="140" y2="287" marker-end="url(#arrow)"/>
+  <text class="label" x="152" y="236">execute</text>
+
+  <line class="edge" x1="140" y1="352" x2="140" y2="407" marker-end="url(#arrow)"/>
+  <text class="label" x="152" y="384">synthesize</text>
+
+  <line class="edge" x1="190" y1="430" x2="229" y2="430" marker-end="url(#arrow)"/>
+
+  <line class="edge-sim" x1="400" y1="176" x2="241" y2="176" marker-end="url(#arrow-sim)"/>
+  <text class="label-sim" x="320" y="167" text-anchor="middle">defines semantics</text>
+
+  <path class="edge-sim dashed" d="M240,320 H488 Q500,320 500,308 V209" marker-end="url(#arrow-sim)"/>
+  <text class="label-sim" x="488" y="236" text-anchor="end">verify</text>
+
+  <!-- Model -->
+  <rect class="box" x="40" y="24" width="200" height="64" rx="10"/>
+  <text class="title" x="140" y="51">Model</text>
+  <text class="sub" x="140" y="70">CubeCL</text>
+
+  <!-- ISA -->
+  <rect class="isa" x="40" y="144" width="200" height="64" rx="10"/>
+  <text class="title" x="140" y="171">Titania ISA</text>
+  <text class="sub" x="140" y="190">instruction set</text>
+
+  <!-- Simulator -->
+  <rect class="sim" x="400" y="144" width="200" height="64" rx="10"/>
+  <text class="title" x="500" y="171">Simulator</text>
+  <text class="sub" x="500" y="190">reference implementation</text>
+
+  <!-- GPU -->
+  <rect class="box" x="40" y="288" width="200" height="64" rx="10"/>
+  <text class="title" x="140" y="315">GPU</text>
+  <text class="sub" x="140" y="334">Verilog</text>
+
+  <!-- FPGA, then ASIC -->
+  <rect class="box" x="90" y="408" width="100" height="44" rx="22"/>
+  <text class="pill" x="140" y="435">FPGA</text>
+  <rect class="box" x="230" y="408" width="100" height="44" rx="22"/>
+  <text class="pill" x="280" y="435">ASIC</text>
+</svg>
