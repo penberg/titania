@@ -13,6 +13,7 @@ pub struct Opts {
 #[argh(subcommand)]
 pub enum Cmd {
     Fetch(FetchCmd),
+    Models(ModelsCmd),
 }
 
 /// Download a model's weights
@@ -23,3 +24,8 @@ pub struct FetchCmd {
     #[argh(positional, default = "models::DEFAULT.to_string()")]
     pub model: String,
 }
+
+/// List known models, whether they are downloaded, and where
+#[derive(FromArgs)]
+#[argh(subcommand, name = "models")]
+pub struct ModelsCmd {}

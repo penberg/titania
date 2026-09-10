@@ -1,4 +1,5 @@
 mod fetch;
+mod list;
 mod models;
 mod opts;
 
@@ -9,6 +10,7 @@ fn main() {
 
     let result = match opts.command {
         Cmd::Fetch(cmd) => fetch::fetch(&cmd.model),
+        Cmd::Models(_) => list::list(),
     };
 
     if let Err(e) = result {
