@@ -44,10 +44,10 @@ impl Model {
     }
 
     /// Local directory the model's files are stored in, under the platform's
-    /// data directory (`~/.local/share` on Linux, `~/Library/Application
-    /// Support` on macOS).
+    /// cache directory (`~/.cache` on Linux, `~/Library/Caches` on macOS):
+    /// the files can always be fetched again.
     pub fn dir(&self) -> Option<PathBuf> {
-        dirs::data_dir().map(|dir| dir.join("titania").join("models").join(self.name))
+        dirs::cache_dir().map(|dir| dir.join("titania").join("models").join(self.name))
     }
 
     /// How many of the model's files are present locally.
