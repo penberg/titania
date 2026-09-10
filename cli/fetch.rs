@@ -20,19 +20,19 @@ pub fn fetch(name: &str) -> Result<(), Box<dyn Error>> {
         if path.exists() {
             continue;
         }
-        download(&model.url(file), &path, file)?;
+        download(model, file, &path)?;
     }
 
     println!("{}", dir.display());
     Ok(())
 }
 
-/// Downloads `url` to `path`, reporting progress on stderr.
+/// Downloads one of the model's files to `path`, reporting progress on stderr.
 ///
 /// The file is written under a temporary name and renamed into place once
 /// complete, so an interrupted download never looks like a finished one.
-fn download(url: &str, path: &Path, file: &str) -> Result<(), Box<dyn Error>> {
-    let response = ureq::get(url).call()?;
+fn download(model: &Model, file: &str, path: &Path) -> Result<(), Box<dyn Error>> {
+    let response = ureq::get(&model.url(file)).call()?;
     let total = response
         .headers()
         .get("content-length")
@@ -51,22 +51,22 @@ fn download(url: &str, path: &Path, file: &str) -> Result<(), Box<dyn Error>> {
         }
         writer.write_all(&buf[..n])?;
         done += n as u64;
-        progress(file, done, total);
+        progress(model.name, file, done, total);
     }
     eprintln!();
     fs::rename(&partial, path)?;
     Ok(())
 }
 
-fn progress(file: &str, done: u64, total: Option<u64>) {
+fn progress(model: &str, file: &str, done: u64, total: Option<u64>) {
     let line = match total {
         Some(total) => format!(
-            "{file}: {} / {} ({}%)",
+            "{model}: {file} {} / {} ({}%)",
             size(done),
             size(total),
             done * 100 / total.max(1)
         ),
-        None => format!("{file}: {}", size(done)),
+        None => format!("{model}: {file} {}", size(done)),
     };
     eprint!("\r\x1b[2K{line}");
     let _ = io::stderr().flush();
