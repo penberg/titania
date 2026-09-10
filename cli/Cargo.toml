@@ -1,0 +1,13 @@
+[package]
+name = "titania-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "titania"
+path = "main.rs"
+
+[dependencies]
+argh = "0.1.19"
+dirs = "7.0.0"
+ureq = "3.4.1"
