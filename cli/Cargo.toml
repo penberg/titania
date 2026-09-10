@@ -10,4 +10,5 @@ path = "main.rs"
 [dependencies]
 argh = "0.1.19"
 dirs = "7.0.0"
+titania-model = { version = "0.1.0", path = "../model" }
 ureq = "3.4.1"

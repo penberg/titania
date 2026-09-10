@@ -1,3 +1,8 @@
 [workspace]
-members = ["cli"]
+members = ["cli", "model"]
 resolver = "3"
+
+# The forward pass is unusably slow unoptimized, so optimize the model crate
+# even in debug builds.
+[profile.dev.package.titania-model]
+opt-level = 3

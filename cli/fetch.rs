@@ -1,18 +1,18 @@
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::models::{MODELS, Model};
 
 /// Downloads a model's files into its local directory, skipping any that are
-/// already there, and prints the directory on stdout.
-pub fn fetch(name: &str) -> Result<(), Box<dyn Error>> {
+/// already there, and returns the directory.
+pub fn fetch(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     let model = Model::find(name).ok_or_else(|| {
         let known: Vec<_> = MODELS.iter().map(|model| model.name).collect();
         format!("unknown model '{name}' (known: {})", known.join(", "))
     })?;
-    let dir = model.dir().ok_or("cannot determine the data directory")?;
+    let dir = model.dir().ok_or("cannot determine the cache directory")?;
     fs::create_dir_all(&dir)?;
 
     for file in model.files {
@@ -23,8 +23,7 @@ pub fn fetch(name: &str) -> Result<(), Box<dyn Error>> {
         download(model, file, &path)?;
     }
 
-    println!("{}", dir.display());
-    Ok(())
+    Ok(dir)
 }
 
 /// Downloads one of the model's files to `path`, reporting progress on stderr.
