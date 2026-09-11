@@ -356,10 +356,12 @@ impl Input {
     /// them along with the cursor's row and column.
     pub fn layout(&self, width: usize) -> (Vec<&str>, (usize, usize)) {
         let lines = wrap_ranges(&self.text, width);
-        // The cursor may be on spaces dropped at the end of a line.
+        // Spaces at the end of a line are dropped from it, but the cursor
+        // still moves over them as they are typed, as far as the line is
+        // wide.
         let row = lines.iter().rposition(|line| line.start <= self.cursor).unwrap_or(0);
         let line = &lines[row];
-        let column = self.text[line.start..self.cursor.min(line.end)].width();
+        let column = self.text[line.start..self.cursor].width().min(width);
         let lines = lines.into_iter().map(|line| &self.text[line]).collect();
         (lines, (row, column))
     }
@@ -418,6 +420,17 @@ mod tests {
         assert_eq!(input.layout(8), (vec!["hello", "world"], (1, 5)));
         input.set("hello ".to_string());
         assert_eq!(input.layout(5), (vec!["hello", ""], (1, 0)));
+        // The cursor follows spaces typed at the end of a line.
+        assert_eq!(input.layout(10), (vec!["hello"], (0, 6)));
+        input.set("hello   ".to_string());
+        assert_eq!(input.layout(8).1, (0, 8));
+        // But at a break between words, it is at the start of the next line.
+        input.set("hello world".to_string());
+        input.home();
+        for _ in 0..6 {
+            input.right();
+        }
+        assert_eq!(input.layout(8).1, (1, 0));
         input.set("ab\ncd".to_string());
         input.home();
         assert_eq!(input.layout(10).1, (1, 0));
