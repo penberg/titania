@@ -2,24 +2,76 @@
 //!
 //! [`Titania`] implements the model's [`Device`] operations by compiling each
 //! one, the first time it is used with a given shape, into a Titania kernel,
-//! and launching it.
+//! and launching it. A [`Monitor`] watches it do so from another thread.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use titania_compiler::{Kernel, kernels};
 use titania_model::{Device, Tensor};
-use titania_simulator::{Launch, Simulator};
+use titania_simulator::{Activity, Launch, Simulator};
 
 /// A Titania GPU, simulated.
-#[derive(Default)]
 pub struct Titania {
     sim: RefCell<Simulator>,
     /// Compiled kernels, by operation and shape.
-    kernels: RefCell<HashMap<Op, Rc<Kernel>>>,
+    kernels: RefCell<HashMap<Op, Rc<Compiled>>>,
     /// Rotary position embedding tables, by head size and base frequency.
     rope_tables: RefCell<HashMap<(usize, u32), RopeTable>>,
+    monitor: Arc<Monitor>,
+}
+
+/// What a [`Titania`] is running, for another thread to watch.
+pub struct Monitor {
+    kernel: Mutex<Option<Arc<KernelInfo>>>,
+    activity: Arc<Activity>,
+}
+
+impl Monitor {
+    /// The kernel launched last: the one running, unless the GPU is idle.
+    pub fn kernel(&self) -> Option<Arc<KernelInfo>> {
+        self.kernel.lock().unwrap().clone()
+    }
+
+    /// What the simulator is doing.
+    pub fn activity(&self) -> &Activity {
+        &self.activity
+    }
+}
+
+/// A compiled kernel, as a [`Monitor`] shows it.
+pub struct KernelInfo {
+    /// The operation the kernel computes, with its shape.
+    pub name: String,
+    pub grid: u32,
+    pub block: u32,
+    /// Bytes of shared memory per block.
+    pub shared: u32,
+    /// The kernel's instructions in assembly syntax, by PC.
+    pub listing: Vec<String>,
+}
+
+/// A kernel compiled for an operation.
+struct Compiled {
+    kernel: Kernel,
+    info: Arc<KernelInfo>,
+}
+
+impl Compiled {
+    fn new(op: Op) -> Self {
+        let kernel = op.compile();
+        let info = Arc::new(KernelInfo {
+            name: op.to_string(),
+            grid: kernel.grid,
+            block: kernel.block,
+            shared: kernel.shared,
+            listing: kernel.instructions.iter().map(ToString::to_string).collect(),
+        });
+        Self { kernel, info }
+    }
 }
 
 /// An operation, specialized to its shapes: what a kernel is compiled for.
@@ -52,6 +104,21 @@ impl Op {
     }
 }
 
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Op::Copy(n) => write!(f, "copy {n}"),
+            Op::Embed(dim) => write!(f, "embed {dim}"),
+            Op::Matvec(rows, cols) => write!(f, "matvec {rows}×{cols}"),
+            Op::Add(n) => write!(f, "add {n}"),
+            Op::Rmsnorm { rows, dim, .. } => write!(f, "rmsnorm {rows}×{dim}"),
+            Op::Rope { n_heads, head_dim } => write!(f, "rope {n_heads}×{head_dim}"),
+            Op::Attention { n_heads, head_dim, .. } => write!(f, "attention {n_heads}×{head_dim}"),
+            Op::SiluMul(n) => write!(f, "silu_mul {n}"),
+        }
+    }
+}
+
 /// Cosines and sines of every rotation angle, for positions up to
 /// `positions`.
 struct RopeTable {
@@ -73,17 +140,34 @@ pub struct Weight {
 
 impl Titania {
     pub fn new() -> Self {
-        Self::default()
+        let sim = Simulator::new();
+        let monitor = Arc::new(Monitor {
+            kernel: Mutex::new(None),
+            activity: sim.activity(),
+        });
+        Self {
+            sim: RefCell::new(sim),
+            kernels: RefCell::default(),
+            rope_tables: RefCell::default(),
+            monitor,
+        }
+    }
+
+    /// A monitor, to watch the GPU from another thread.
+    pub fn monitor(&self) -> Arc<Monitor> {
+        self.monitor.clone()
     }
 
     /// Runs an operation, compiling it first if this is its first use.
     fn run(&self, op: Op, params: &[u32]) {
-        let kernel = self
+        let compiled = self
             .kernels
             .borrow_mut()
             .entry(op)
-            .or_insert_with(|| Rc::new(op.compile()))
+            .or_insert_with(|| Rc::new(Compiled::new(op)))
             .clone();
+        *self.monitor.kernel.lock().unwrap() = Some(compiled.info.clone());
+        let kernel = &compiled.kernel;
         let launch = Launch {
             program: &kernel.program,
             grid: kernel.grid,
@@ -126,6 +210,12 @@ impl Titania {
         let addr = sim.alloc(words.len() * 4);
         sim.write(addr, words);
         addr
+    }
+}
+
+impl Default for Titania {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

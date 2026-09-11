@@ -10,11 +10,11 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::Stylize;
 use titania_model::{Chat, Cpu, Model, Sampler, Tokenizer};
-use titania_runtime::Titania;
-use unicode_width::UnicodeWidthStr;
+use titania_runtime::{Monitor, Titania};
 
 use crate::fetch;
 use crate::logo;
+use crate::monitor::Panel;
 use crate::opts::Device;
 use crate::tui::{self, Input, Line, Screen, span};
 
@@ -40,7 +40,11 @@ pub fn run(name: &str, device: Device) -> Result<(), Box<dyn Error>> {
         thread::spawn(move || {
             let result = match device {
                 Device::Cpu => serve(&dir, Cpu, requests_rx, &replies_tx, &stop),
-                Device::Sim => serve(&dir, Titania::new(), requests_rx, &replies_tx, &stop),
+                Device::Sim => {
+                    let gpu = Titania::new();
+                    let _ = replies_tx.send(Reply::Monitor(gpu.monitor()));
+                    serve(&dir, gpu, requests_rx, &replies_tx, &stop)
+                }
             };
             if let Err(e) = result {
                 let _ = replies_tx.send(Reply::Failed(e.to_string()));
@@ -64,6 +68,7 @@ pub fn run(name: &str, device: Device) -> Result<(), Box<dyn Error>> {
         context: 0,
         speed: None,
         lines: Vec::new(),
+        gpu: None,
         requests,
         replies,
         stop,
@@ -78,6 +83,8 @@ pub fn run(name: &str, device: Device) -> Result<(), Box<dyn Error>> {
 
 /// What the model thread reports back.
 enum Reply {
+    /// A monitor for the simulated GPU the model runs on.
+    Monitor(Arc<Monitor>),
     Loaded { tokens: usize },
     Text(String),
     Done { tokens: usize },
@@ -152,6 +159,8 @@ struct App {
     speed: Option<f32>,
     /// Lines waiting to be printed above the live region.
     lines: Vec<Line>,
+    /// What the simulated GPU is running, when the model runs on one.
+    gpu: Option<Panel>,
     requests: Sender<String>,
     replies: Receiver<Reply>,
     stop: Arc<AtomicBool>,
@@ -288,6 +297,7 @@ impl App {
 
     fn reply(&mut self, reply: Reply) -> Result<(), Box<dyn Error>> {
         match reply {
+            Reply::Monitor(monitor) => self.gpu = Some(Panel::new(monitor)),
             Reply::Loaded { tokens } => {
                 self.context = tokens;
                 self.status = Status::Idle;
@@ -388,10 +398,16 @@ impl App {
             live.push(Line::new());
         }
 
+        // What the GPU is running, in whatever room the input box leaves.
+        if let Some(gpu) = &mut self.gpu
+            && matches!(self.status, Status::Thinking(_) | Status::Generating { .. })
+        {
+            live.extend(gpu.draw(columns, rows.saturating_sub(live.len() + 4)));
+        }
+
         // The input box, as tall as its text but no taller than the screen,
         // scrolled to show the cursor.
-        let inner = columns.saturating_sub(6).max(1);
-        let (text, (row, column)) = self.input.layout(inner);
+        let (text, (row, column)) = self.input.layout(columns.saturating_sub(6).max(1));
         let height = rows.saturating_sub(live.len() + 3).max(1);
         let first = (row + 1).saturating_sub(height);
         let border = |left: &str, right: &str| {
@@ -410,14 +426,7 @@ impl App {
             } else {
                 span(line)
             };
-            let pad = inner.saturating_sub(content.content().width());
-            live.push(vec![
-                span("│ ").dark_grey(),
-                prompt,
-                content,
-                span(" ".repeat(pad)),
-                span(" │").dark_grey(),
-            ]);
+            live.push(tui::boxed(vec![prompt, content], columns));
         }
         live.push(border("╰", "╯"));
         live.push(self.footer(columns));
@@ -469,11 +478,7 @@ impl App {
             left.push_str(&format!(" · {speed:.1} tok/s"));
         }
         let right = "shift+enter for newline · ctrl+c to quit  ";
-        let gap = columns.saturating_sub(left.chars().count() + right.chars().count());
-        if gap < 2 {
-            return vec![span(left).dark_grey()];
-        }
-        vec![span(left).dark_grey(), span(" ".repeat(gap)), span(right).dark_grey()]
+        tui::spread(vec![span(left).dark_grey()], vec![span(right).dark_grey()], columns)
     }
 }
 

@@ -6,7 +6,8 @@
 //! does, and blocks run in parallel on the host's cores.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use rayon::prelude::*;
 
@@ -15,6 +16,10 @@ const WARP_SIZE: u32 = 32;
 
 /// Number of general-purpose registers.
 const NUM_REGS: usize = 64;
+
+/// Instructions a block executes between samples of where one of its warps
+/// is, for [`Activity`].
+const SAMPLE_INTERVAL: u64 = 1024;
 
 /// The guard field value for `pt`, the always-true predicate.
 const PT: u8 = 7;
@@ -172,6 +177,57 @@ pub struct Simulator {
     /// enough because blocks never access the same location when one of them
     /// writes it (§3).
     memory: Vec<AtomicU32>,
+    activity: Arc<Activity>,
+}
+
+/// What a simulator is doing, updated as it runs so that another thread can
+/// watch it.
+///
+/// Keeping it up to date costs next to nothing: a block adds up the
+/// instructions it executes and publishes them when it finishes, and records
+/// where a warp is only every `SAMPLE_INTERVAL` instructions.
+#[derive(Default)]
+pub struct Activity {
+    launches: AtomicU64,
+    instructions: AtomicU64,
+    /// A [`Sample`], packed into one word so that it is read whole.
+    sample: AtomicU64,
+}
+
+/// Where a warp was when sampled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    pub block: u32,
+    pub warp: u32,
+    pub pc: usize,
+}
+
+impl Activity {
+    /// Kernels launched so far.
+    pub fn launches(&self) -> u64 {
+        self.launches.load(Relaxed)
+    }
+
+    /// Instructions executed so far by blocks that have finished, counting
+    /// each instruction once per warp that executes it.
+    pub fn instructions(&self) -> u64 {
+        self.instructions.load(Relaxed)
+    }
+
+    /// Where a warp of the kernel launched last was recently.
+    pub fn sample(&self) -> Sample {
+        let packed = self.sample.load(Relaxed);
+        Sample {
+            block: (packed >> 32) as u32,
+            warp: (packed >> 24 & 0xff) as u32,
+            pc: (packed & 0xff_ffff) as usize,
+        }
+    }
+
+    fn record(&self, sample: Sample) {
+        let packed = (sample.block as u64) << 32 | (sample.warp as u64) << 24 | (sample.pc as u64 & 0xff_ffff);
+        self.sample.store(packed, Relaxed);
+    }
 }
 
 /// A kernel launch (§5).
@@ -218,6 +274,11 @@ impl Simulator {
         Self::default()
     }
 
+    /// What the simulator is doing, to watch it from another thread.
+    pub fn activity(&self) -> Arc<Activity> {
+        self.activity.clone()
+    }
+
     /// Allocates `bytes` of zeroed global memory, returning its address.
     pub fn alloc(&mut self, bytes: usize) -> u32 {
         let start = (self.memory.len() * 4).next_multiple_of(256);
@@ -262,9 +323,12 @@ impl Simulator {
             .map(|(pc, &word)| decode(word).ok_or(Error::InvalidInstruction { pc, word }))
             .collect::<Result<Vec<_>, _>>()?;
 
+        self.activity.launches.fetch_add(1, Relaxed);
+        self.activity.record(Sample { block: 0, warp: 0, pc: 0 });
         (0..launch.grid).into_par_iter().try_for_each(|id| {
             Block {
                 memory: &self.memory,
+                activity: &self.activity,
                 program: &program,
                 launch,
                 id,
@@ -278,6 +342,7 @@ impl Simulator {
 /// A block being executed.
 struct Block<'a> {
     memory: &'a [AtomicU32],
+    activity: &'a Activity,
     program: &'a [Inst],
     launch: &'a Launch<'a>,
     id: u32,
@@ -355,15 +420,26 @@ impl Block<'_> {
         let mut warps: Vec<Warp> = (0..self.launch.block.div_ceil(WARP_SIZE))
             .map(|id| Warp::new(id, self.launch.block))
             .collect();
+        let mut executed = 0;
         loop {
             // Run each warp until it finishes or waits at a barrier. When every
             // unfinished warp is waiting, the barrier releases them all.
             for warp in &mut warps {
                 while warp.state == State::Running {
+                    let pc = warp.pc;
                     self.step(warp)?;
+                    executed += 1;
+                    if executed % SAMPLE_INTERVAL == 0 {
+                        self.activity.record(Sample {
+                            block: self.id,
+                            warp: warp.id,
+                            pc,
+                        });
+                    }
                 }
             }
             if warps.iter().all(|warp| warp.state == State::Finished) {
+                self.activity.instructions.fetch_add(executed, Relaxed);
                 return Ok(());
             }
             for warp in &mut warps {

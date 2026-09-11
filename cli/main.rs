@@ -2,6 +2,7 @@ mod fetch;
 mod list;
 mod logo;
 mod models;
+mod monitor;
 mod opts;
 mod run;
 mod tui;

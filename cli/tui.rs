@@ -8,7 +8,7 @@ use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
-use crossterm::style::{Color, Print, PrintStyledContent, StyledContent};
+use crossterm::style::{Color, Print, PrintStyledContent, StyledContent, Stylize};
 use crossterm::terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate};
 use crossterm::{execute, queue};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -42,6 +42,30 @@ pub fn truncate(line: &Line, columns: usize) -> Line {
         }
     }
     truncated
+}
+
+/// A row of a box `columns` wide: `content` between its sides, padded or
+/// cut to fit.
+pub fn boxed(content: Line, columns: usize) -> Line {
+    let inner = columns.saturating_sub(4);
+    let content = truncate(&content, inner);
+    let pad = inner - width(&content);
+    let mut line = vec![span("│ ").dark_grey()];
+    line.extend(content);
+    line.push(span(" ".repeat(pad)));
+    line.push(span(" │").dark_grey());
+    line
+}
+
+/// `left` and `right` at either end of a line `columns` wide, or just `left`
+/// if both don't fit.
+pub fn spread(mut left: Line, right: Line, columns: usize) -> Line {
+    let gap = columns.saturating_sub(width(&left) + width(&right));
+    if gap >= 2 {
+        left.push(span(" ".repeat(gap)));
+        left.extend(right);
+    }
+    left
 }
 
 /// A styled piece of text.
