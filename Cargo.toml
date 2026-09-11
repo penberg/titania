@@ -1,8 +1,11 @@
 [workspace]
-members = ["cli", "model"]
+members = ["cli", "compiler", "model", "runtime", "simulator"]
 resolver = "3"
 
-# The forward pass is unusably slow unoptimized, so optimize the model crate
-# even in debug builds.
+# The forward pass is unusably slow unoptimized, on the CPU and in the
+# simulator alike, so optimize both even in debug builds.
 [profile.dev.package.titania-model]
+opt-level = 3
+
+[profile.dev.package.titania-simulator]
 opt-level = 3

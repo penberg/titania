@@ -11,4 +11,5 @@ path = "main.rs"
 argh = "0.1.19"
 dirs = "7.0.0"
 titania-model = { version = "0.1.0", path = "../model" }
+titania-runtime = { version = "0.1.0", path = "../runtime" }
 ureq = "3.4.1"

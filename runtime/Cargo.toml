@@ -1,0 +1,12 @@
+[package]
+name = "titania-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+titania-compiler = { version = "0.1.0", path = "../compiler" }
+titania-model = { version = "0.1.0", path = "../model" }
+titania-simulator = { version = "0.1.0", path = "../simulator" }

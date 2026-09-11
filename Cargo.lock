@@ -493,8 +493,13 @@ dependencies = [
  "argh",
  "dirs",
  "titania-model",
+ "titania-runtime",
  "ureq",
 ]
+
+[[package]]
+name = "titania-compiler"
+version = "0.1.0"
 
 [[package]]
 name = "titania-model"
@@ -504,6 +509,22 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "titania-runtime"
+version = "0.1.0"
+dependencies = [
+ "titania-compiler",
+ "titania-model",
+ "titania-simulator",
+]
+
+[[package]]
+name = "titania-simulator"
+version = "0.1.0"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]

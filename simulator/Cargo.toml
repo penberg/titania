@@ -1,0 +1,10 @@
+[package]
+name = "titania-simulator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+rayon = "1.12.0"
