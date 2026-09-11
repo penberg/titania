@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use crate::{Device, Model, Result, Sampler, State, Tokenizer};
 
 /// A conversation with an instruction-tuned model, in the ChatML format that
@@ -43,9 +45,14 @@ impl<D: Device> Chat<D> {
         })
     }
 
+    /// Number of tokens in the conversation so far.
+    pub fn tokens(&self) -> usize {
+        self.len
+    }
+
     /// Sends a message from the user, streaming the reply's text to `on_text`
-    /// as it is generated.
-    pub fn send(&mut self, message: &str, mut on_text: impl FnMut(&str)) -> Result<()> {
+    /// as it is generated. The reply ends early if `on_text` breaks.
+    pub fn send(&mut self, message: &str, mut on_text: impl FnMut(&str) -> ControlFlow<()>) -> Result<()> {
         let t = &self.tokenizer;
         let mut prompt = vec![self.im_start];
         prompt.extend(t.encode(&format!("user\n{message}"))?);
@@ -68,14 +75,17 @@ impl<D: Device> Chat<D> {
                 break;
             }
             let chunk = text.push(self.tokenizer.decode(token));
-            if !chunk.is_empty() {
-                on_text(&chunk);
-            }
+            let flow = if chunk.is_empty() { ControlFlow::Continue(()) } else { on_text(&chunk) };
+            // Feed the token even if the reply ends here, so that the model
+            // remembers the reply exactly as far as it was shown.
             logits = self.feed(&[token])?;
+            if flow.is_break() {
+                break;
+            }
         }
 
         // End the reply the way the chat format expects, ready for the next
-        // message.
+        // message, even if it was cut short.
         let mut end = vec![self.im_end];
         end.extend(self.tokenizer.encode("\n")?);
         self.feed(&end)?;

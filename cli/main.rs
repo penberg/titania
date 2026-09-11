@@ -1,8 +1,10 @@
 mod fetch;
 mod list;
+mod logo;
 mod models;
 mod opts;
 mod run;
+mod tui;
 
 use std::path::Path;
 
