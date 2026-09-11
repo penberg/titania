@@ -1,11 +1,11 @@
 <p align="center">
-  <img src=".github/assets/hero.png" width="320" alt="Project Titania logo">
+  <img src=".github/assets/hero.png" width="400" alt="Project Titania logo">
 </p>
 
 <h1 align="center">Project Titania</h1>
 
 <p align="center">
-  <em>A complete LLM system, from transformer to transistor, simple enough for one person to understand.</em>
+  A large language model, from transformer to transistor.
 </p>
 
 ## Introduction
@@ -18,6 +18,23 @@ understand, and implement all of it.
 <p align="center">
   <img src=".github/assets/architecture.svg" width="640" alt="Titania architecture: the model, a transformer, is compiled to the Titania ISA. The GPU, an RTL design, executes the ISA and is synthesized to an FPGA and then an ASIC. The ISA simulator defines the semantics of the ISA, and the GPU is verified against it.">
 </p>
+
+## Getting Started
+
+Install the `titania` command:
+
+```console
+cargo install --path cli
+```
+
+Then chat with the model, which is downloaded on first use:
+
+```console
+titania run
+```
+
+`titania models` lists the supported models, whether they are downloaded, and
+where they are stored. `titania fetch` downloads a model ahead of time.
 
 ## Blueprint
 
@@ -74,23 +91,6 @@ does the arithmetic. The design first runs in an RTL simulator, where every
 program must produce the same results as on the ISA simulator. It is then
 synthesized onto an FPGA, and eventually manufactured as silicon.
 
-## Getting Started
-
-Install the `titania` command:
-
-```console
-cargo install --path cli
-```
-
-Then chat with the model, which is downloaded on first use:
-
-```console
-titania run
-```
-
-`titania models` lists the supported models, whether they are downloaded, and
-where they are stored. `titania fetch` downloads a model ahead of time.
-
 ## Milestones
 
 - [x] Model runs on CPU
@@ -99,3 +99,15 @@ where they are stored. `titania fetch` downloads a model ahead of time.
 - [ ] Model runs on RTL simulator
 - [ ] Model runs on FPGA
 - [ ] Tapeout
+
+## License
+
+This project is licensed under the [MIT license].
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in Titania by you, shall be licensed as MIT, without any additional
+terms or conditions.
+
+[MIT license]: LICENSE.md
