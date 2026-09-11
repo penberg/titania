@@ -63,6 +63,10 @@ Or run it on the Titania ISA simulator instead of the CPU:
 titania run --device sim
 ```
 
+The model has a `bash` tool, so asking it about the files or the system you
+are on makes it run a command and read the output. Commands run without
+confirmation.
+
 ---
 
 ## Running on the Titania GPU

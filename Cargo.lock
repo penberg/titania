@@ -712,6 +712,7 @@ dependencies = [
  "argh",
  "crossterm",
  "dirs",
+ "serde_json",
  "titania-model",
  "titania-runtime",
  "unicode-width",

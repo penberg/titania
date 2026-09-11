@@ -101,13 +101,46 @@ impl Tokenizer {
     }
 
     /// Encodes text into tokens. Special tokens in the text are treated as
-    /// plain text; insert them by id with [`special`](Self::special).
+    /// plain text; insert them by id with [`special`](Self::special), or
+    /// encode text that is meant to contain them with
+    /// [`encode_with_special`](Self::encode_with_special).
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
         let mut out = Vec::new();
-        for word in self.pattern.find_iter(text) {
-            self.merge(word?.as_str().as_bytes(), &mut out);
+        self.encode_into(text, &mut out)?;
+        Ok(out)
+    }
+
+    /// Encodes text like [`encode`](Self::encode), but with special tokens
+    /// written in it, such as `<tool_call>`, encoded by id. For text of the
+    /// chat template, not text from the user, who could otherwise end a
+    /// turn.
+    pub fn encode_with_special(&self, text: &str) -> Result<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            // The earliest special token in the text, and the longest one
+            // if several start there.
+            let next = self
+                .special
+                .iter()
+                .filter_map(|(content, &id)| rest.find(content.as_str()).map(|at| (at, content.len(), id)))
+                .min_by_key(|&(at, len, _)| (at, std::cmp::Reverse(len)));
+            let Some((at, len, id)) = next else {
+                self.encode_into(rest, &mut out)?;
+                break;
+            };
+            self.encode_into(&rest[..at], &mut out)?;
+            out.push(id);
+            rest = &rest[at + len..];
         }
         Ok(out)
+    }
+
+    fn encode_into(&self, text: &str, out: &mut Vec<u32>) -> Result<()> {
+        for word in self.pattern.find_iter(text) {
+            self.merge(word?.as_str().as_bytes(), out);
+        }
+        Ok(())
     }
 
     /// Bytes a token stands for. A token can end partway through a UTF-8
