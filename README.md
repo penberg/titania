@@ -94,8 +94,8 @@ where they are stored. `titania fetch` downloads a model ahead of time.
 ## Milestones
 
 - [x] Model runs on CPU
-- [ ] Compiler emits Titania ISA
-- [ ] Model runs on ISA simulator
+- [x] Compiler emits Titania ISA
+- [x] Model runs on ISA simulator
 - [ ] Model runs on RTL simulator
 - [ ] Model runs on FPGA
 - [ ] Tapeout
