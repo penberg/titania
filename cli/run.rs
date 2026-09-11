@@ -12,8 +12,9 @@ use crossterm::style::Stylize;
 use titania_model::{Chat, Cpu, Model, Sampler, Tokenizer};
 use titania_runtime::{Monitor, Titania};
 
-use crate::fetch;
+use crate::fetch::{self, Progress};
 use crate::logo;
+use crate::models;
 use crate::monitor::Panel;
 use crate::opts::Device;
 use crate::tui::{self, Input, Line, Screen, span};
@@ -27,10 +28,10 @@ const TICK: Duration = Duration::from_millis(80);
 
 /// Chats with a model on the command line, fetching it first if needed.
 pub fn run(name: &str, device: Device) -> Result<(), Box<dyn Error>> {
-    let dir = fetch::fetch(name)?;
+    let (model, dir) = fetch::locate(name)?;
 
     // The model runs on a thread of its own, so that the UI stays responsive
-    // while it loads and generates.
+    // while it downloads, loads, and generates.
     let (requests, requests_rx) = mpsc::channel();
     let (replies_tx, replies) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -38,15 +39,7 @@ pub fn run(name: &str, device: Device) -> Result<(), Box<dyn Error>> {
         let dir = dir.clone();
         let stop = stop.clone();
         thread::spawn(move || {
-            let result = match device {
-                Device::Cpu => serve(&dir, Cpu, requests_rx, &replies_tx, &stop),
-                Device::Sim => {
-                    let gpu = Titania::new();
-                    let _ = replies_tx.send(Reply::Monitor(gpu.monitor()));
-                    serve(&dir, gpu, requests_rx, &replies_tx, &stop)
-                }
-            };
-            if let Err(e) = result {
+            if let Err(e) = work(model, &dir, device, requests_rx, &replies_tx, &stop) {
                 let _ = replies_tx.send(Reply::Failed(e.to_string()));
             }
         });
@@ -83,12 +76,40 @@ pub fn run(name: &str, device: Device) -> Result<(), Box<dyn Error>> {
 
 /// What the model thread reports back.
 enum Reply {
+    /// Part of one of the model's files has been downloaded.
+    Downloading(Progress),
+    /// All of the model's files are present, and it is being loaded.
+    Fetched,
     /// A monitor for the simulated GPU the model runs on.
     Monitor(Arc<Monitor>),
     Loaded { tokens: usize },
     Text(String),
     Done { tokens: usize },
     Failed(String),
+}
+
+/// Fetches the model if needed, then loads it and answers messages until
+/// the UI hangs up.
+fn work(
+    model: &'static models::Model,
+    dir: &Path,
+    device: Device,
+    requests: Receiver<String>,
+    replies: &Sender<Reply>,
+    stop: &AtomicBool,
+) -> Result<(), Box<dyn Error>> {
+    fetch::fetch(model, dir, |progress| {
+        let _ = replies.send(Reply::Downloading(progress));
+    })?;
+    let _ = replies.send(Reply::Fetched);
+    match device {
+        Device::Cpu => serve(dir, Cpu, requests, replies, stop),
+        Device::Sim => {
+            let gpu = Titania::new();
+            let _ = replies.send(Reply::Monitor(gpu.monitor()));
+            serve(dir, gpu, requests, replies, stop)
+        }
+    }
 }
 
 /// Loads the model and answers messages until the UI hangs up.
@@ -130,6 +151,8 @@ fn seed() -> u64 {
 
 /// What the model is doing.
 enum Status {
+    /// Downloading one of the model's files, since when.
+    Downloading { since: Instant, progress: Progress },
     Loading(Instant),
     Idle,
     /// Reading the prompt, before the first token of the reply.
@@ -206,7 +229,7 @@ impl App {
         let busy = !matches!(self.status, Status::Idle);
         match key.code {
             KeyCode::Char('c') if ctrl => {
-                if busy && !matches!(self.status, Status::Loading(_)) {
+                if matches!(self.status, Status::Thinking(_) | Status::Generating { .. }) {
                     self.interrupt();
                 } else if !self.input.is_empty() {
                     self.input.take();
@@ -297,6 +320,15 @@ impl App {
 
     fn reply(&mut self, reply: Reply) -> Result<(), Box<dyn Error>> {
         match reply {
+            Reply::Downloading(progress) => {
+                // Time each file on its own, so the speed is of this one.
+                let since = match self.status {
+                    Status::Downloading { since, progress: last } if last.file == progress.file => since,
+                    _ => Instant::now(),
+                };
+                self.status = Status::Downloading { since, progress };
+            }
+            Reply::Fetched => self.status = Status::Loading(Instant::now()),
             Reply::Monitor(monitor) => self.gpu = Some(Panel::new(monitor)),
             Reply::Loaded { tokens } => {
                 self.context = tokens;
@@ -441,6 +473,11 @@ impl App {
         const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
         let (verb, since, details) = match self.status {
             Status::Idle => return None,
+            Status::Downloading { since, progress } => (
+                format!("Downloading {}…", self.model),
+                since,
+                download_details(progress, since.elapsed()),
+            ),
             Status::Loading(since) => (
                 format!("Loading {}…", self.model),
                 since,
@@ -480,6 +517,34 @@ impl App {
         let right = "shift+enter for newline · ctrl+c to quit  ";
         tui::spread(vec![span(left).dark_grey()], vec![span(right).dark_grey()], columns)
     }
+}
+
+/// How a download is going: the file, how much of it has arrived, and at what
+/// speed, with the time left once the file's size is known.
+fn download_details(progress: Progress, elapsed: Duration) -> String {
+    let Progress { file, done, total } = progress;
+    let mut details = format!("{file} · {}", fetch::size(done));
+    if let Some(total) = total {
+        details.push_str(&format!(" / {} ({}%)", fetch::size(total), done * 100 / total.max(1)));
+    }
+    // Too early to tell the speed, or nothing has arrived yet.
+    if elapsed < Duration::from_secs(1) || done == 0 {
+        return details;
+    }
+    let rate = done as f64 / elapsed.as_secs_f64();
+    details.push_str(&format!(" · {}/s", fetch::size(rate as u64)));
+    if let Some(total) = total
+        && done < total
+    {
+        let left = ((total - done) as f64 / rate).round() as u64;
+        let left = match left {
+            0..60 => format!("{left}s"),
+            60..3600 => format!("{}m {}s", left / 60, left % 60),
+            _ => format!("{}h {}m", left / 3600, left % 3600 / 60),
+        };
+        details.push_str(&format!(" · {left} left"));
+    }
+    details
 }
 
 /// A line of the reply, the first one marked with a bullet.
