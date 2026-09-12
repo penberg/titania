@@ -1,4 +1,4 @@
-use crate::insn::{Insn, Instruction, SR_CTAID, SR_NCTAID, SR_NTID, SR_TID};
+use crate::insn::{Insn, Instruction, SR_CTAID_X, SR_CTAID_Y, SR_NCTAID_X, SR_NCTAID_Y, SR_NTID, SR_TID};
 
 use crate::codegen;
 
@@ -186,12 +186,24 @@ impl Builder {
         self.special(SR_NTID)
     }
 
-    pub fn ctaid(&mut self) -> Value {
-        self.special(SR_CTAID)
+    /// The block's number along x.
+    pub fn ctaid_x(&mut self) -> Value {
+        self.special(SR_CTAID_X)
     }
 
-    pub fn nctaid(&mut self) -> Value {
-        self.special(SR_NCTAID)
+    /// The block's number along y.
+    pub fn ctaid_y(&mut self) -> Value {
+        self.special(SR_CTAID_Y)
+    }
+
+    /// The grid's width.
+    pub fn nctaid_x(&mut self) -> Value {
+        self.special(SR_NCTAID_X)
+    }
+
+    /// The grid's height.
+    pub fn nctaid_y(&mut self) -> Value {
+        self.special(SR_NCTAID_Y)
     }
 
     /// Loads the `index`th 32-bit kernel parameter.
@@ -427,7 +439,7 @@ impl Builder {
 
     /// This thread's index in the whole grid.
     pub fn global_id(&mut self) -> Value {
-        let (block, size, tid) = (self.ctaid(), self.ntid(), self.tid());
+        let (block, size, tid) = (self.ctaid_x(), self.ntid(), self.tid());
         self.imad(block, size, tid)
     }
 

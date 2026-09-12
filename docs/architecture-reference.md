@@ -21,8 +21,11 @@ A **kernel** is a program that runs on many threads at once. Launching a kernel
 creates a **grid** of **blocks**, and each block consists of **threads**:
 
 - The grid size (number of blocks) and block size (threads per block) are
-  given at launch. Blocks are numbered `0` to `grid size - 1`, and threads
-  within a block `0` to `block size - 1`.
+  given at launch. The grid is two-dimensional: a block is numbered `(x, y)`
+  with `x` from `0` to `grid width - 1` and `y` from `0` to
+  `grid height - 1`, so that a kernel over a matrix, say, can give each block
+  a row and a column of it. Threads within a block are numbered `0` to
+  `block size - 1`.
 - Every thread runs the same program, starting at instruction 0, and tells
   itself apart from other threads by reading its thread and block number from
   special registers (§2.3).
@@ -95,12 +98,14 @@ thread starts.
 
 Special registers are read with `S2R`:
 
-| Number | Name      | Value                                  |
-|--------|-----------|----------------------------------------|
-| 0      | `%tid`    | Thread number within the block         |
-| 1      | `%ntid`   | Block size                             |
-| 2      | `%ctaid`  | Block number within the grid           |
-| 3      | `%nctaid` | Grid size                              |
+| Number | Name        | Value                                 |
+|--------|-------------|---------------------------------------|
+| 0      | `%tid`      | Thread number within the block        |
+| 1      | `%ntid`     | Block size                            |
+| 2      | `%ctaid.x`  | Block number within the grid, along x |
+| 3      | `%nctaid.x` | Grid width                            |
+| 4      | `%ctaid.y`  | Block number within the grid, along y |
+| 5      | `%nctaid.y` | Grid height                           |
 
 A thread's lane within its warp is `%tid & 31`.
 
@@ -162,7 +167,7 @@ A launch is described by:
 | Field              | Meaning                                                   |
 |--------------------|-----------------------------------------------------------|
 | Program            | The kernel's instructions. Execution starts at instruction 0. |
-| Grid size          | Number of blocks, at least 1.                             |
+| Grid size          | Width and height of the grid, in blocks, each at least 1. |
 | Block size         | Threads per block, from 1 to 1024.                        |
 | Shared memory size | Bytes of shared memory per block: a multiple of 4, up to 65536. |
 | Parameters         | Up to 256 bytes, a multiple of 4, read with `LDP`.        |

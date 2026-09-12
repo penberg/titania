@@ -14,7 +14,7 @@ pub use chat::Chat;
 pub use config::Config;
 pub use cpu::Cpu;
 pub use device::Device;
-pub use model::{Model, State};
+pub use model::{BATCH, Model, State};
 pub use sampler::Sampler;
 pub use tokenizer::Tokenizer;
 pub use weights::{Tensor, Weights};

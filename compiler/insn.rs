@@ -15,8 +15,10 @@ pub const PT: u8 = 7;
 /// Special registers, read with `S2R`.
 pub const SR_TID: u32 = 0;
 pub const SR_NTID: u32 = 1;
-pub const SR_CTAID: u32 = 2;
-pub const SR_NCTAID: u32 = 3;
+pub const SR_CTAID_X: u32 = 2;
+pub const SR_NCTAID_X: u32 = 3;
+pub const SR_CTAID_Y: u32 = 4;
+pub const SR_NCTAID_Y: u32 = 5;
 
 /// An operation, with its opcode (§8 of the manual).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,8 +240,10 @@ impl fmt::Display for Instruction {
                 let name = match imm {
                     SR_TID => "%tid",
                     SR_NTID => "%ntid",
-                    SR_CTAID => "%ctaid",
-                    _ => "%nctaid",
+                    SR_CTAID_X => "%ctaid.x",
+                    SR_NCTAID_X => "%nctaid.x",
+                    SR_CTAID_Y => "%ctaid.y",
+                    _ => "%nctaid.y",
                 };
                 write!(f, " r{rd}, {name}")
             }

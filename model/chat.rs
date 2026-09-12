@@ -94,14 +94,11 @@ impl<D: Device> Chat<D> {
 
     /// Runs tokens through the model, returning the logits after the last one.
     fn feed(&mut self, tokens: &[u32]) -> Result<Vec<f32>> {
-        let mut logits = Vec::new();
-        for &token in tokens {
-            if self.len == self.state.max_len() {
-                return Err("the conversation no longer fits in the context window".into());
-            }
-            logits = self.model.forward(&mut self.state, token, self.len);
-            self.len += 1;
+        if self.len + tokens.len() > self.state.max_len() {
+            return Err("the conversation no longer fits in the context window".into());
         }
+        let logits = self.model.forward(&mut self.state, tokens, self.len);
+        self.len += tokens.len();
         Ok(logits)
     }
 }

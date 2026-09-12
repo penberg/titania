@@ -60,7 +60,11 @@ impl Panel {
             span(format!("{}┐", "─".repeat(columns.saturating_sub(2 + title.width())))).dark_grey(),
         ]];
 
-        let mut launch = format!("grid {} · block {}", kernel.grid, kernel.block);
+        let grid = match kernel.grid {
+            [width, 1] => width.to_string(),
+            [width, height] => format!("{width}×{height}"),
+        };
+        let mut launch = format!("grid {grid} · block {}", kernel.block);
         if kernel.shared > 0 {
             launch.push_str(&format!(" · {} shared", bytes(kernel.shared)));
         }

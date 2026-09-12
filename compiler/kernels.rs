@@ -15,7 +15,8 @@ pub struct Kernel {
     pub instructions: Vec<Instruction>,
     /// The instructions, encoded.
     pub program: Vec<u64>,
-    pub grid: u32,
+    /// Blocks along x and y.
+    pub grid: [u32; 2],
     pub block: u32,
     /// Bytes of shared memory per block.
     pub shared: u32,
@@ -32,12 +33,12 @@ impl Kernel {
     }
 }
 
-fn kernel(b: Builder, grid: usize, block: usize, shared: usize) -> Kernel {
+fn kernel(b: Builder, grid: [usize; 2], block: usize, shared: usize) -> Kernel {
     let instructions = b.finish().unwrap_or_else(|e| panic!("failed to compile kernel: {e}"));
     Kernel {
         program: instructions.iter().map(Instruction::encode).collect(),
         instructions,
-        grid: grid as u32,
+        grid: grid.map(|n| n as u32),
         block: block as u32,
         shared: shared as u32,
     }
@@ -67,7 +68,7 @@ fn warp_per_row(b: &mut Builder, rows: usize) -> (crate::Value, crate::Value) {
     let tid = b.tid();
     let lane = b.and(tid, 31);
     let warp = b.shr(tid, 5);
-    let block = b.ctaid();
+    let block = b.ctaid_x();
     let warps = b.mov(WARPS as u32);
     let row = b.imad(block, warps, warp);
     let past = b.isetp(Cond::Ge, row, rows as u32);
@@ -87,7 +88,7 @@ pub fn copy(n: usize) -> Kernel {
     let value = b.ldg(from, 0);
     let to = b.iadd(dst, offset);
     b.stg(to, 0, value);
-    kernel(b, n.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [n.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
 /// `x[i] += y[i]` for `i < n`.
@@ -104,7 +105,7 @@ pub fn add(n: usize) -> Kernel {
     let c = b.ldg(y_addr, 0);
     let sum = b.fadd(a, c);
     b.stg(x_addr, 0, sum);
-    kernel(b, n.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [n.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
 /// `gate[i] = silu(gate[i]) * up[i]` for `i < n`, where
@@ -126,7 +127,7 @@ pub fn silu_mul(n: usize) -> Kernel {
     let silu = b.fdiv(g, denom);
     let result = b.fmul(silu, u);
     b.stg(gate_addr, 0, result);
-    kernel(b, n.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [n.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
 /// `out = table[token]`, for a bf16 table with rows of `dim` elements. Each
@@ -150,19 +151,36 @@ pub fn embed(dim: usize) -> Kernel {
     let to = b.iadd(out, out_offset);
     b.stg(to, 0, first);
     b.stg(to, 4, second);
-    kernel(b, pairs.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [pairs.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
-/// `out = w · x` for a bf16 matrix `w` of shape `[rows, cols]`.
+/// Tokens a warp of `matmul` handles at once: how many times fewer each
+/// weight is read than with one token per warp.
+pub const TILE: usize = 8;
+
+/// `out[t] = w · x[t]` for a bf16 matrix `w` of shape `[rows, cols]` and `n`
+/// tokens, each a row of `cols` activations in `x` and of `rows` results in
+/// `out`.
 ///
-/// Each warp computes one row: lane `l` multiplies words `l`, `l + 32`, ...
-/// of the row, two elements each, and the warp sums the lanes' results.
+/// Each warp computes one row of `w` for a tile of tokens, so that it reads
+/// each weight once for the whole tile: lane `l` multiplies words `l`,
+/// `l + 32`, ... of the row, two elements each, by every token's activations,
+/// and the warp sums the lanes' results. The grid is one block of rows wide
+/// and one tile of tokens high. A tile is `TILE` tokens, or all `n` if
+/// fewer, so `n` must be a multiple of `TILE` or at most `TILE`; a caller
+/// splits a batch into a run of full tiles and the remainder.
 ///
 /// Parameters: `out`, `w`, `x`.
-pub fn matvec(rows: usize, cols: usize) -> Kernel {
-    assert!(cols.is_multiple_of(64), "matvec needs a multiple of 64 columns, got {cols}");
+pub fn matmul(rows: usize, cols: usize, n: usize) -> Kernel {
+    assert!(cols.is_multiple_of(64), "matmul needs a multiple of 64 columns, got {cols}");
+    let tile = n.min(TILE);
+    assert!(n.is_multiple_of(tile), "matmul needs a multiple of {TILE} tokens or at most {TILE}, got {n}");
     let steps = cols / 64;
-    let unroll = [4, 2, 1].into_iter().find(|u| steps.is_multiple_of(*u)).unwrap();
+    // Unroll the loop over the columns, as far as the tile is small.
+    let unroll = [4, 2, 1]
+        .into_iter()
+        .find(|u| steps.is_multiple_of(*u) && u * tile <= TILE)
+        .unwrap();
     let mut b = Builder::new();
     let (lane, row) = warp_per_row(&mut b, rows);
     let (out, w, x) = (b.param(0), b.param(1), b.param(2));
@@ -170,34 +188,49 @@ pub fn matvec(rows: usize, cols: usize) -> Kernel {
     let w_row = b.imad(row, row_bytes, w);
     let lane_word = b.shl(lane, 2);
     let w_addr = b.iadd(w_row, lane_word);
+    // The lane's pair of activations for each token of the tile.
+    let tile_id = b.ctaid_y();
+    let tile_bytes = b.mov((tile * cols * 4) as u32);
+    let x_tile = b.imad(tile_id, tile_bytes, x);
     let lane_pair = b.shl(lane, 3);
-    let x_addr = b.iadd(x, lane_pair);
-    let even = b.mov(0.0f32);
-    let odd = b.mov(0.0f32);
+    let x_first = b.iadd(x_tile, lane_pair);
+    let x_addr: Vec<_> = (0..tile)
+        .map(|t| if t == 0 { x_first } else { b.iadd(x_first, (t * cols * 4) as u32) })
+        .collect();
+    let even: Vec<_> = (0..tile).map(|_| b.mov(0.0f32)).collect();
+    let odd: Vec<_> = (0..tile).map(|_| b.mov(0.0f32)).collect();
     b.for_range(0u32, steps as u32, unroll as u32, |b, _| {
         for u in 0..unroll as u32 {
             let word = b.ldg(w_addr, u * 128);
-            let x0 = b.ldg(x_addr, u * 256);
-            let x1 = b.ldg(x_addr, u * 256 + 4);
             let w0 = b.shl(word, 16);
             let w1 = b.and(word, HIGH_HALF);
-            let sum = b.ffma(w0, x0, even);
-            b.assign(even, sum);
-            let sum = b.ffma(w1, x1, odd);
-            b.assign(odd, sum);
+            for t in 0..tile {
+                let x0 = b.ldg(x_addr[t], u * 256);
+                let x1 = b.ldg(x_addr[t], u * 256 + 4);
+                let sum = b.ffma(w0, x0, even[t]);
+                b.assign(even[t], sum);
+                let sum = b.ffma(w1, x1, odd[t]);
+                b.assign(odd[t], sum);
+            }
         }
         let next = b.iadd(w_addr, 128 * unroll as u32);
         b.assign(w_addr, next);
-        let next = b.iadd(x_addr, 256 * unroll as u32);
-        b.assign(x_addr, next);
+        for &x_addr in &x_addr {
+            let next = b.iadd(x_addr, 256 * unroll as u32);
+            b.assign(x_addr, next);
+        }
     });
-    let partial = b.fadd(even, odd);
-    let sum = b.warp_sum(partial);
+    let out_tile_bytes = b.mov((tile * rows * 4) as u32);
+    let out_tile = b.imad(tile_id, out_tile_bytes, out);
     let row_offset = b.shl(row, 2);
-    let to = b.iadd(out, row_offset);
+    let to = b.iadd(out_tile, row_offset);
     let first = b.isetp(Cond::Eq, lane, 0);
-    b.when(first, |b| b.stg(to, 0, sum));
-    kernel(b, rows.div_ceil(WARPS), WARPS * 32, 0)
+    for t in 0..tile {
+        let partial = b.fadd(even[t], odd[t]);
+        let sum = b.warp_sum(partial);
+        b.when(first, |b| b.stg(to, (t * rows * 4) as u32, sum));
+    }
+    kernel(b, [rows.div_ceil(WARPS), n / tile], WARPS * 32, 0)
 }
 
 /// Normalizes each of `rows` rows of `x`, each `dim` elements long, by its
@@ -244,28 +277,33 @@ pub fn rmsnorm(rows: usize, dim: usize, eps: f32) -> Kernel {
             b.stg(x_addr, step * 256 + half, y);
         }
     }
-    kernel(b, rows.div_ceil(WARPS), WARPS * 32, 0)
+    kernel(b, [rows.div_ceil(WARPS), 1], WARPS * 32, 0)
 }
 
-/// Rotates each of `n_heads` heads of `x`, each `head_dim` elements long, to
-/// encode position `pos`. Element `i` of a head pairs with element
-/// `i + head_dim / 2`, rotated by the angle in a table of cosines and sines:
-/// `table[pos][i] = (cos, sin)`.
+/// Rotates each of `n_heads` heads of `x`, each `head_dim` elements long, for
+/// each of `n` tokens, to encode the token's position: `pos` for the first
+/// token, `pos + 1` for the next, and so on. Element `i` of a head pairs with
+/// element `i + head_dim / 2`, rotated by the angle in a table of cosines and
+/// sines: `table[pos][i] = (cos, sin)`.
 ///
-/// Each block rotates one head, with one thread per pair.
+/// The grid is one block per head wide and one per token high, with one
+/// thread per pair.
 ///
 /// Parameters: `x`, `table`, `pos`.
-pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
+pub fn rope(n_heads: usize, head_dim: usize, n: usize) -> Kernel {
     let half = head_dim / 2;
     let mut b = Builder::new();
-    let (head, i) = (b.ctaid(), b.tid());
+    let (head, token, i) = (b.ctaid_x(), b.ctaid_y(), b.tid());
     let (x, table, pos) = (b.param(0), b.param(1), b.param(2));
+    let heads = b.mov(n_heads as u32);
+    let index = b.imad(token, heads, head);
     let head_bytes = b.mov((head_dim * 4) as u32);
-    let x_head = b.imad(head, head_bytes, x);
+    let x_head = b.imad(index, head_bytes, x);
     let offset = b.shl(i, 2);
     let x_addr = b.iadd(x_head, offset);
     let a = b.ldg(x_addr, 0);
     let c = b.ldg(x_addr, (half * 4) as u32);
+    let pos = b.iadd(pos, token);
     let row = b.mov(half as u32);
     let entry = b.imad(pos, row, i);
     let entry_offset = b.shl(entry, 3);
@@ -280,14 +318,17 @@ pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
     let second = b.fadd(c_cos, a_sin);
     b.stg(x_addr, 0, first);
     b.stg(x_addr, (half * 4) as u32, second);
-    kernel(b, n_heads, half, 0)
+    kernel(b, [n_heads, n], half, 0)
 }
 
-/// Causal self-attention: each of `n_heads` query heads in `q` attends over
-/// the first `len` positions of the key and value caches, which hold
-/// `n_kv_heads` heads per position and room for `max_len` positions.
+/// Causal self-attention for `n` tokens in `q`, the first at position `pos`:
+/// each of a token's `n_heads` query heads attends over the key and value
+/// caches up to and including the token's own position. The caches hold
+/// `n_kv_heads` heads per position and room for `max_len` positions, and must
+/// already hold the tokens' own keys and values.
 ///
-/// Each block handles one head, with one thread per element of the head:
+/// The grid is one block per head wide and one per token high, with one
+/// thread per element of the head:
 ///
 /// 1. Each warp scores a share of the positions: the dot product of the
 ///    query with the position's key.
@@ -298,8 +339,8 @@ pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
 ///
 /// Shared memory holds one partial result per warp, then the scores.
 ///
-/// Parameters: `out`, `q`, `k_cache`, `v_cache`, `len`.
-pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize) -> Kernel {
+/// Parameters: `out`, `q`, `k_cache`, `v_cache`, `pos`.
+pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize, n: usize) -> Kernel {
     assert!(head_dim.is_multiple_of(32) && head_dim <= 1024, "unsupported head size {head_dim}");
     let group = n_heads / n_kv_heads;
     assert!(group.is_power_of_two(), "query heads per key/value head must be a power of two");
@@ -312,16 +353,23 @@ pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: us
     let scale = 1.0 / (head_dim as f32).sqrt();
 
     let mut b = Builder::new();
-    let (head, tid) = (b.ctaid(), b.tid());
+    let (head, token, tid) = (b.ctaid_x(), b.ctaid_y(), b.tid());
     let lane = b.and(tid, 31);
     let warp = b.shr(tid, 5);
     let first = b.isetp(Cond::Eq, lane, 0);
     let tid_offset = b.shl(tid, 2);
     let warp_offset = b.shl(warp, 2);
-    let (out, q, k, v, len) = (b.param(0), b.param(1), b.param(2), b.param(3), b.param(4));
+    let (out, q, k, v, pos) = (b.param(0), b.param(1), b.param(2), b.param(3), b.param(4));
+    // Positions the token attends over: up to and including its own.
+    let own = b.iadd(pos, token);
+    let len = b.iadd(own, 1);
     let kv_head = b.shr(head, group.trailing_zeros());
     let kv_offset = b.imul(kv_head, head_bytes);
-    let head_offset = b.imul(head, head_bytes);
+    // The token's head in `q` and `out`, which hold every head of a token
+    // together.
+    let heads = b.mov(n_heads as u32);
+    let index = b.imad(token, heads, head);
+    let head_offset = b.imul(index, head_bytes);
 
     // 1. Scores. Each lane holds every 32nd element of the query.
     let lane_offset = b.shl(lane, 2);
@@ -412,5 +460,5 @@ pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: us
     let out_head = b.iadd(out, head_offset);
     let out_addr = b.iadd(out_head, tid_offset);
     b.stg(out_addr, 0, result);
-    kernel(b, n_heads, head_dim, shared)
+    kernel(b, [n_heads, n], head_dim, shared)
 }

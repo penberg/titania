@@ -18,26 +18,58 @@ impl Device for Cpu {
         vec![0.0; len]
     }
 
+    fn resize(&self, buf: &mut Vec<f32>, len: usize) {
+        assert!(len <= buf.capacity(), "a buffer of {} activations can't hold {len}", buf.capacity());
+        buf.resize(len, 0.0);
+    }
+
     fn read(&self, buf: &Vec<f32>) -> Vec<f32> {
         buf.clone()
     }
 
-    fn copy(&self, dst: &mut Vec<f32>, offset: usize, src: &Vec<f32>) {
-        dst[offset..offset + src.len()].copy_from_slice(src);
+    fn copy(&self, dst: &mut Vec<f32>, dst_offset: usize, src: &Vec<f32>, src_offset: usize, len: usize) {
+        dst[dst_offset..][..len].copy_from_slice(&src[src_offset..][..len]);
     }
 
-    fn embed(&self, out: &mut Vec<f32>, table: &Tensor, token: usize) {
-        let row = &table.data[token * out.len()..][..out.len()];
-        for (o, &w) in out.iter_mut().zip(row) {
-            *o = bf16(w);
+    fn embed(&self, out: &mut Vec<f32>, table: &Tensor, tokens: &[u32]) {
+        let dim = table.shape[1];
+        assert_eq!(out.len(), tokens.len() * dim);
+        for (out, &token) in out.chunks_exact_mut(dim).zip(tokens) {
+            let row = &table.data[token as usize * dim..][..dim];
+            for (o, &w) in out.iter_mut().zip(row) {
+                *o = bf16(w);
+            }
         }
     }
 
-    fn matvec(&self, out: &mut Vec<f32>, w: &Tensor, x: &Vec<f32>) {
-        assert_eq!(w.shape, [out.len(), x.len()]);
-        out.par_iter_mut()
-            .zip(w.data.par_chunks_exact(x.len()))
-            .for_each(|(o, row)| *o = dot(row, x));
+    fn matmul(&self, out: &mut Vec<f32>, w: &Tensor, x: &Vec<f32>) {
+        let (rows, cols) = (w.shape[0], w.shape[1]);
+        let n = x.len() / cols;
+        assert_eq!(x.len(), n * cols);
+        assert_eq!(out.len(), n * rows);
+        if n == 1 {
+            out.par_iter_mut()
+                .zip(w.data.par_chunks_exact(cols))
+                .for_each(|(o, row)| *o = dot(row, x));
+            return;
+        }
+        // Each row of the weights is read from memory once, for every
+        // token: the results come out by row, and are transposed into `out`,
+        // which holds them by token.
+        let mut by_row = vec![0.0; rows * n];
+        by_row
+            .par_chunks_exact_mut(n)
+            .zip(w.data.par_chunks_exact(cols))
+            .for_each(|(results, row)| {
+                for (result, x) in results.iter_mut().zip(x.chunks_exact(cols)) {
+                    *result = dot(row, x);
+                }
+            });
+        for (r, results) in by_row.chunks_exact(n).enumerate() {
+            for (t, &result) in results.iter().enumerate() {
+                out[t * rows + r] = result;
+            }
+        }
     }
 
     fn add(&self, x: &mut Vec<f32>, y: &Vec<f32>) {
@@ -57,17 +89,20 @@ impl Device for Cpu {
         }
     }
 
-    fn rope(&self, x: &mut Vec<f32>, pos: usize, head_dim: usize, theta: f32) {
+    fn rope(&self, x: &mut Vec<f32>, pos: usize, n_heads: usize, head_dim: usize, theta: f32) {
         // Each head is rotated as pairs of elements half a head apart, each
         // pair at its own frequency.
         let half = head_dim / 2;
-        for head in x.chunks_exact_mut(head_dim) {
-            for i in 0..half {
-                let freq = 1.0 / theta.powf((2 * i) as f32 / head_dim as f32);
-                let (sin, cos) = (pos as f32 * freq).sin_cos();
-                let (a, b) = (head[i], head[i + half]);
-                head[i] = a * cos - b * sin;
-                head[i + half] = b * cos + a * sin;
+        for (t, token) in x.chunks_exact_mut(n_heads * head_dim).enumerate() {
+            let pos = pos + t;
+            for head in token.chunks_exact_mut(head_dim) {
+                for i in 0..half {
+                    let freq = 1.0 / theta.powf((2 * i) as f32 / head_dim as f32);
+                    let (sin, cos) = (pos as f32 * freq).sin_cos();
+                    let (a, b) = (head[i], head[i + half]);
+                    head[i] = a * cos - b * sin;
+                    head[i + half] = b * cos + a * sin;
+                }
             }
         }
     }
@@ -78,19 +113,23 @@ impl Device for Cpu {
         q: &Vec<f32>,
         k_cache: &Vec<f32>,
         v_cache: &Vec<f32>,
-        len: usize,
+        pos: usize,
+        n_heads: usize,
         head_dim: usize,
         n_kv_heads: usize,
     ) {
         // With grouped-query attention, consecutive query heads share a key
         // and value head.
-        let group = q.len() / head_dim / n_kv_heads;
+        let group = n_heads / n_kv_heads;
         let kv_dim = n_kv_heads * head_dim;
         let scale = 1.0 / (head_dim as f32).sqrt();
         out.par_chunks_exact_mut(head_dim)
             .zip(q.par_chunks_exact(head_dim))
             .enumerate()
-            .for_each(|(head, (out, q))| {
+            .for_each(|(i, (out, q))| {
+                let (token, head) = (i / n_heads, i % n_heads);
+                // The token attends up to and including its own position.
+                let len = pos + token + 1;
                 let kv = head / group * head_dim;
                 let mut scores: Vec<f32> = (0..len)
                     .map(|t| scale * dot_f32(q, &k_cache[t * kv_dim + kv..][..head_dim]))
