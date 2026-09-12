@@ -7,7 +7,9 @@ use crate::Tensor;
 /// on it. [`Cpu`](crate::Cpu) is the reference implementation; other devices
 /// run the same operations on Titania.
 pub trait Device {
-    /// A vector of f32 activations in device memory.
+    /// A vector of f32 activations in device memory. Operations that work
+    /// on rows of activations, one per token, take a buffer's length as a
+    /// whole number of rows.
     type Buffer;
     /// A bf16 weight tensor in device memory.
     type Weight;
@@ -18,17 +20,32 @@ pub trait Device {
     /// Allocates a zeroed buffer of `len` activations.
     fn alloc(&self, len: usize) -> Self::Buffer;
 
+    /// Sets a buffer's length, up to the length it was allocated with, so
+    /// that it holds a batch of some other number of tokens. The
+    /// activations it gains are undefined.
+    fn resize(&self, buf: &mut Self::Buffer, len: usize);
+
     /// Copies a buffer out of device memory.
     fn read(&self, buf: &Self::Buffer) -> Vec<f32>;
 
-    /// `dst[offset..offset + src.len()] = src`
-    fn copy(&self, dst: &mut Self::Buffer, offset: usize, src: &Self::Buffer);
+    /// `dst[dst_offset..][..len] = src[src_offset..][..len]`
+    fn copy(
+        &self,
+        dst: &mut Self::Buffer,
+        dst_offset: usize,
+        src: &Self::Buffer,
+        src_offset: usize,
+        len: usize,
+    );
 
-    /// `out = table[token]`: looks up a row of an embedding table.
-    fn embed(&self, out: &mut Self::Buffer, table: &Self::Weight, token: usize);
+    /// `out[t] = table[tokens[t]]`: looks up each token's row of an embedding
+    /// table.
+    fn embed(&self, out: &mut Self::Buffer, table: &Self::Weight, tokens: &[u32]);
 
-    /// `out = w · x`, for a weight matrix `w` of shape `[out.len(), x.len()]`.
-    fn matvec(&self, out: &mut Self::Buffer, w: &Self::Weight, x: &Self::Buffer);
+    /// `out[t] = w · x[t]` for each row `x[t]` of `x`, for a weight matrix
+    /// `w` of shape `[rows, cols]`: `x` holds `cols` activations per token,
+    /// and `out` `rows` per token.
+    fn matmul(&self, out: &mut Self::Buffer, w: &Self::Weight, x: &Self::Buffer);
 
     /// `x += y`
     fn add(&self, x: &mut Self::Buffer, y: &Self::Buffer);
@@ -37,13 +54,18 @@ pub trait Device {
     /// then scales it by `weight`.
     fn rmsnorm(&self, x: &mut Self::Buffer, weight: &Self::Weight, eps: f32);
 
-    /// Rotates each `head_dim`-long head of `x` to encode position `pos`
-    /// (rotary position embeddings).
-    fn rope(&self, x: &mut Self::Buffer, pos: usize, head_dim: usize, theta: f32);
+    /// Rotates each `head_dim`-long head of `x`, which holds `n_heads` heads
+    /// per token, to encode the token's position (rotary position
+    /// embeddings): `pos` for the first token, `pos + 1` for the next, and so
+    /// on.
+    fn rope(&self, x: &mut Self::Buffer, pos: usize, n_heads: usize, head_dim: usize, theta: f32);
 
-    /// Causal self-attention: each `head_dim`-long head of `q` attends over
-    /// the first `len` positions of the key and value caches, which hold
-    /// `n_kv_heads` heads per position, and writes its result to `out`.
+    /// Causal self-attention for the tokens in `q`, the first at position
+    /// `pos`: each of a token's `n_heads` heads, each `head_dim` long,
+    /// attends over the key and value caches up to and including the token's
+    /// own position, and writes its result to `out`. The caches hold
+    /// `n_kv_heads` heads per position, and must already hold the tokens'
+    /// own keys and values.
     #[allow(clippy::too_many_arguments)]
     fn attention(
         &self,
@@ -51,7 +73,8 @@ pub trait Device {
         q: &Self::Buffer,
         k_cache: &Self::Buffer,
         v_cache: &Self::Buffer,
-        len: usize,
+        pos: usize,
+        n_heads: usize,
         head_dim: usize,
         n_kv_heads: usize,
     );

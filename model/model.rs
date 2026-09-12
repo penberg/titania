@@ -83,47 +83,48 @@ impl<D: Device> Model<D> {
         let head_dim = c.head_dim();
         let kv_dim = c.num_key_value_heads * head_dim;
 
-        d.embed(&mut s.x, &self.embed, token as usize);
+        d.embed(&mut s.x, &self.embed, &[token]);
         for (i, layer) in self.layers.iter().enumerate() {
             // Attention, with the result added back into the residual stream.
-            d.copy(&mut s.xb, 0, &s.x);
+            d.copy(&mut s.xb, 0, &s.x, 0, c.hidden_size);
             d.rmsnorm(&mut s.xb, &layer.attn_norm, eps);
-            d.matvec(&mut s.q, &layer.q, &s.xb);
-            d.matvec(&mut s.k, &layer.k, &s.xb);
-            d.matvec(&mut s.v, &layer.v, &s.xb);
+            d.matmul(&mut s.q, &layer.q, &s.xb);
+            d.matmul(&mut s.k, &layer.k, &s.xb);
+            d.matmul(&mut s.v, &layer.v, &s.xb);
             if let Some(q_norm) = &layer.q_norm {
                 d.rmsnorm(&mut s.q, q_norm, eps);
             }
             if let Some(k_norm) = &layer.k_norm {
                 d.rmsnorm(&mut s.k, k_norm, eps);
             }
-            d.rope(&mut s.q, pos, head_dim, c.rope_theta);
-            d.rope(&mut s.k, pos, head_dim, c.rope_theta);
-            d.copy(&mut s.k_cache[i], pos * kv_dim, &s.k);
-            d.copy(&mut s.v_cache[i], pos * kv_dim, &s.v);
+            d.rope(&mut s.q, pos, c.num_attention_heads, head_dim, c.rope_theta);
+            d.rope(&mut s.k, pos, c.num_key_value_heads, head_dim, c.rope_theta);
+            d.copy(&mut s.k_cache[i], pos * kv_dim, &s.k, 0, kv_dim);
+            d.copy(&mut s.v_cache[i], pos * kv_dim, &s.v, 0, kv_dim);
             d.attention(
                 &mut s.att,
                 &s.q,
                 &s.k_cache[i],
                 &s.v_cache[i],
-                pos + 1,
+                pos,
+                c.num_attention_heads,
                 head_dim,
                 c.num_key_value_heads,
             );
-            d.matvec(&mut s.xb, &layer.o, &s.att);
+            d.matmul(&mut s.xb, &layer.o, &s.att);
             d.add(&mut s.x, &s.xb);
 
             // Feed-forward network, likewise added back.
-            d.copy(&mut s.xb, 0, &s.x);
+            d.copy(&mut s.xb, 0, &s.x, 0, c.hidden_size);
             d.rmsnorm(&mut s.xb, &layer.mlp_norm, eps);
-            d.matvec(&mut s.gate, &layer.gate, &s.xb);
-            d.matvec(&mut s.up, &layer.up, &s.xb);
+            d.matmul(&mut s.gate, &layer.gate, &s.xb);
+            d.matmul(&mut s.up, &layer.up, &s.xb);
             d.silu_mul(&mut s.gate, &s.up);
-            d.matvec(&mut s.xb, &layer.down, &s.gate);
+            d.matmul(&mut s.xb, &layer.down, &s.gate);
             d.add(&mut s.x, &s.xb);
         }
         d.rmsnorm(&mut s.x, &self.norm, eps);
-        d.matvec(&mut s.logits, self.lm_head.as_ref().unwrap_or(&self.embed), &s.x);
+        d.matmul(&mut s.logits, self.lm_head.as_ref().unwrap_or(&self.embed), &s.x);
         d.read(&s.logits)
     }
 }

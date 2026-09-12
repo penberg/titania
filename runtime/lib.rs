@@ -10,6 +10,7 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use titania_compiler::kernels::TILE;
 use titania_compiler::{Kernel, kernels};
 use titania_model::{Device, Tensor};
 use titania_simulator::{Activity, Launch, Simulator};
@@ -138,6 +139,8 @@ struct RopeTable {
 pub struct Buffer {
     addr: u32,
     len: usize,
+    /// The length it was allocated with.
+    capacity: usize,
 }
 
 /// A bf16 weight tensor in global memory.
@@ -248,26 +251,48 @@ impl Device for Titania {
         Buffer {
             addr: self.sim.borrow_mut().alloc(len * 4),
             len,
+            capacity: len,
         }
+    }
+
+    fn resize(&self, buf: &mut Buffer, len: usize) {
+        assert!(len <= buf.capacity, "a buffer of {} activations can't hold {len}", buf.capacity);
+        buf.len = len;
     }
 
     fn read(&self, buf: &Buffer) -> Vec<f32> {
         self.sim.borrow().read(buf.addr, buf.len).into_iter().map(f32::from_bits).collect()
     }
 
-    fn copy(&self, dst: &mut Buffer, offset: usize, src: &Buffer) {
-        assert!(offset + src.len <= dst.len);
-        self.run(Op::Copy(src.len), &[dst.addr + (offset * 4) as u32, src.addr]);
+    fn copy(&self, dst: &mut Buffer, dst_offset: usize, src: &Buffer, src_offset: usize, len: usize) {
+        assert!(dst_offset + len <= dst.len && src_offset + len <= src.len);
+        let params = [dst.addr + (dst_offset * 4) as u32, src.addr + (src_offset * 4) as u32];
+        self.run(Op::Copy(len), &params);
     }
 
-    fn embed(&self, out: &mut Buffer, table: &Weight, token: usize) {
-        assert_eq!(table.shape[1], out.len);
-        self.run(Op::Embed(out.len), &[out.addr, table.addr, token as u32]);
+    fn embed(&self, out: &mut Buffer, table: &Weight, tokens: &[u32]) {
+        let dim = table.shape[1];
+        assert_eq!(out.len, tokens.len() * dim);
+        for (t, &token) in tokens.iter().enumerate() {
+            self.run(Op::Embed(dim), &[out.addr + (t * dim * 4) as u32, table.addr, token]);
+        }
     }
 
-    fn matvec(&self, out: &mut Buffer, w: &Weight, x: &Buffer) {
-        assert_eq!(w.shape, [out.len, x.len]);
-        self.run(Op::Matmul { rows: out.len, cols: x.len, n: 1 }, &[out.addr, w.addr, x.addr]);
+    fn matmul(&self, out: &mut Buffer, w: &Weight, x: &Buffer) {
+        let (rows, cols) = (w.shape[0], w.shape[1]);
+        let n = x.len / cols;
+        assert_eq!(x.len, n * cols);
+        assert_eq!(out.len, n * rows);
+        // The kernel takes whole tiles of tokens, or a batch smaller than a
+        // tile: the full tiles go in one launch and the rest in another.
+        let full = n / TILE * TILE;
+        if full > 0 {
+            self.run(Op::Matmul { rows, cols, n: full }, &[out.addr, w.addr, x.addr]);
+        }
+        if n > full {
+            let params = [out.addr + (full * rows * 4) as u32, w.addr, x.addr + (full * cols * 4) as u32];
+            self.run(Op::Matmul { rows, cols, n: n - full }, &params);
+        }
     }
 
     fn add(&self, x: &mut Buffer, y: &Buffer) {
@@ -284,14 +309,11 @@ impl Device for Titania {
         self.run(op, &[x.addr, weight.addr]);
     }
 
-    fn rope(&self, x: &mut Buffer, pos: usize, head_dim: usize, theta: f32) {
-        let table = self.rope_table(head_dim, theta, pos);
-        let op = Op::Rope {
-            n_heads: x.len / head_dim,
-            head_dim,
-            n: 1,
-        };
-        self.run(op, &[x.addr, table, pos as u32]);
+    fn rope(&self, x: &mut Buffer, pos: usize, n_heads: usize, head_dim: usize, theta: f32) {
+        let n = x.len / (n_heads * head_dim);
+        assert_eq!(x.len, n * n_heads * head_dim);
+        let table = self.rope_table(head_dim, theta, pos + n - 1);
+        self.run(Op::Rope { n_heads, head_dim, n }, &[x.addr, table, pos as u32]);
     }
 
     fn attention(
@@ -300,18 +322,22 @@ impl Device for Titania {
         q: &Buffer,
         k_cache: &Buffer,
         v_cache: &Buffer,
-        len: usize,
+        pos: usize,
+        n_heads: usize,
         head_dim: usize,
         n_kv_heads: usize,
     ) {
+        let n = q.len / (n_heads * head_dim);
+        assert_eq!(q.len, n * n_heads * head_dim);
+        assert_eq!(out.len, q.len);
         let op = Op::Attention {
-            n_heads: q.len / head_dim,
+            n_heads,
             head_dim,
             n_kv_heads,
             max_len: k_cache.len / (n_kv_heads * head_dim),
-            n: 1,
+            n,
         };
-        let params = [out.addr, q.addr, k_cache.addr, v_cache.addr, (len - 1) as u32];
+        let params = [out.addr, q.addr, k_cache.addr, v_cache.addr, pos as u32];
         self.run(op, &params);
     }
 
@@ -351,7 +377,7 @@ mod tests {
     fn buffers(gpu: &Titania, n: usize, seed: u32) -> (Vec<f32>, Buffer) {
         let values = numbers(n, seed);
         let words: Vec<u32> = values.iter().map(|x| x.to_bits()).collect();
-        let buf = Buffer { addr: gpu.upload_words(&words), len: n };
+        let buf = Buffer { addr: gpu.upload_words(&words), len: n, capacity: n };
         (values, buf)
     }
 
@@ -379,43 +405,50 @@ mod tests {
         assert_close(&gpu, &x, &cpu_x);
 
         let (mut cpu_dst, mut dst) = buffers(&gpu, n + 10, 3);
-        Cpu.copy(&mut cpu_dst, 7, &cpu_x);
-        gpu.copy(&mut dst, 7, &x);
+        Cpu.copy(&mut cpu_dst, 7, &cpu_x, 5, n - 5);
+        gpu.copy(&mut dst, 7, &x, 5, n - 5);
         assert_close(&gpu, &dst, &cpu_dst);
+    }
+
+    #[test]
+    fn resize() {
+        let gpu = Titania::new();
+        let (mut cpu_x, mut x) = buffers(&gpu, 300, 1);
+        let (cpu_y, y) = buffers(&gpu, 100, 2);
+        Cpu.resize(&mut cpu_x, 100);
+        gpu.resize(&mut x, 100);
+        Cpu.add(&mut cpu_x, &cpu_y);
+        gpu.add(&mut x, &y);
+        assert_close(&gpu, &x, &cpu_x);
+        Cpu.resize(&mut cpu_x, 300);
+        gpu.resize(&mut x, 300);
+        assert_eq!(gpu.read(&x).len(), 300);
     }
 
     #[test]
     fn embed() {
         let gpu = Titania::new();
         let table = tensor(&[10, 128], 4);
-        let (mut cpu_out, mut out) = buffers(&gpu, 128, 5);
-        Cpu.embed(&mut cpu_out, &table, 3);
+        let tokens = [3, 9, 0];
+        let (mut cpu_out, mut out) = buffers(&gpu, 3 * 128, 5);
+        Cpu.embed(&mut cpu_out, &table, &tokens);
         let table = gpu.upload(table);
-        gpu.embed(&mut out, &table, 3);
+        gpu.embed(&mut out, &table, &tokens);
         assert_close(&gpu, &out, &cpu_out);
     }
 
-    /// One token, a partial tile, and whole tiles.
+    /// Batches of one token, a partial tile, whole tiles, and whole tiles
+    /// with a remainder.
     #[test]
     fn matmul() {
-        for (rows, cols, n) in [(24, 256, 1), (5, 64, 3), (9, 384, 16)] {
+        for (rows, cols, n) in [(24, 256, 1), (5, 64, 3), (9, 384, 16), (24, 128, 19)] {
             let gpu = Titania::new();
             let w = tensor(&[rows, cols], 6);
             let (cpu_x, x) = buffers(&gpu, n * cols, 7);
             let (mut cpu_out, mut out) = buffers(&gpu, n * rows, 8);
-            // The CPU multiplies one token at a time.
-            for (out, x) in cpu_out.chunks_exact_mut(rows).zip(cpu_x.chunks_exact(cols)) {
-                let mut result = vec![0.0; rows];
-                Cpu.matvec(&mut result, &w, &x.to_vec());
-                out.copy_from_slice(&result);
-            }
+            Cpu.matmul(&mut cpu_out, &w, &cpu_x);
             let w = gpu.upload(w);
-            // The device runs the kernel for one token; only the kernel
-            // takes a tile so far.
-            match n {
-                1 => gpu.matvec(&mut out, &w, &x),
-                _ => gpu.run(Op::Matmul { rows, cols, n }, &[out.addr, w.addr, x.addr]),
-            }
+            gpu.matmul(&mut out, &w, &x);
             assert_close(&gpu, &out, &cpu_out);
         }
     }
@@ -435,25 +468,11 @@ mod tests {
 
     #[test]
     fn rope() {
-        let (n_heads, head_dim, theta) = (4, 128, 1_000_000.0);
-        for (pos, n) in [(37, 1), (37, 3)] {
+        for n in [1, 3] {
             let gpu = Titania::new();
-            let (mut cpu_x, mut x) = buffers(&gpu, n * n_heads * head_dim, 11);
-            // The CPU rotates one token at a time.
-            for (t, token) in cpu_x.chunks_exact_mut(n_heads * head_dim).enumerate() {
-                let mut rotated = token.to_vec();
-                Cpu.rope(&mut rotated, pos + t, head_dim, theta);
-                token.copy_from_slice(&rotated);
-            }
-            // The device runs the kernel for one token; only the kernel
-            // takes a batch so far.
-            match n {
-                1 => gpu.rope(&mut x, pos, head_dim, theta),
-                _ => {
-                    let table = gpu.rope_table(head_dim, theta, pos + n - 1);
-                    gpu.run(Op::Rope { n_heads, head_dim, n }, &[x.addr, table, pos as u32]);
-                }
-            }
+            let (mut cpu_x, mut x) = buffers(&gpu, n * 4 * 128, 11);
+            Cpu.rope(&mut cpu_x, 37, 4, 128, 1_000_000.0);
+            gpu.rope(&mut x, 37, 4, 128, 1_000_000.0);
             assert_close(&gpu, &x, &cpu_x);
         }
     }
@@ -464,27 +483,12 @@ mod tests {
         for (pos, n) in [(0, 1), (6, 1), (32, 1), (39, 1), (0, 5), (30, 10)] {
             let gpu = Titania::new();
             let kv_len = max_len * n_kv_heads * head_dim;
-            let width = n_heads * head_dim;
-            let (cpu_q, q) = buffers(&gpu, n * width, 12);
+            let (cpu_q, q) = buffers(&gpu, n * n_heads * head_dim, 12);
             let (cpu_k, k) = buffers(&gpu, kv_len, 13);
             let (cpu_v, v) = buffers(&gpu, kv_len, 14);
-            let (mut cpu_out, mut out) = buffers(&gpu, n * width, 15);
-            // The CPU attends for one token at a time, each up to and
-            // including its own position.
-            for (t, (out, q)) in cpu_out.chunks_exact_mut(width).zip(cpu_q.chunks_exact(width)).enumerate() {
-                let mut result = vec![0.0; width];
-                Cpu.attention(&mut result, &q.to_vec(), &cpu_k, &cpu_v, pos + t + 1, head_dim, n_kv_heads);
-                out.copy_from_slice(&result);
-            }
-            // The device runs the kernel for one token; only the kernel
-            // takes a batch so far.
-            match n {
-                1 => gpu.attention(&mut out, &q, &k, &v, pos + 1, head_dim, n_kv_heads),
-                _ => {
-                    let op = Op::Attention { n_heads, head_dim, n_kv_heads, max_len, n };
-                    gpu.run(op, &[out.addr, q.addr, k.addr, v.addr, pos as u32]);
-                }
-            }
+            let (mut cpu_out, mut out) = buffers(&gpu, n * n_heads * head_dim, 15);
+            Cpu.attention(&mut cpu_out, &cpu_q, &cpu_k, &cpu_v, pos, n_heads, head_dim, n_kv_heads);
+            gpu.attention(&mut out, &q, &k, &v, pos, n_heads, head_dim, n_kv_heads);
             assert_close(&gpu, &out, &cpu_out);
         }
     }
