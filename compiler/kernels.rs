@@ -15,7 +15,8 @@ pub struct Kernel {
     pub instructions: Vec<Instruction>,
     /// The instructions, encoded.
     pub program: Vec<u64>,
-    pub grid: u32,
+    /// Blocks along x and y.
+    pub grid: [u32; 2],
     pub block: u32,
     /// Bytes of shared memory per block.
     pub shared: u32,
@@ -32,12 +33,12 @@ impl Kernel {
     }
 }
 
-fn kernel(b: Builder, grid: usize, block: usize, shared: usize) -> Kernel {
+fn kernel(b: Builder, grid: [usize; 2], block: usize, shared: usize) -> Kernel {
     let instructions = b.finish().unwrap_or_else(|e| panic!("failed to compile kernel: {e}"));
     Kernel {
         program: instructions.iter().map(Instruction::encode).collect(),
         instructions,
-        grid: grid as u32,
+        grid: grid.map(|n| n as u32),
         block: block as u32,
         shared: shared as u32,
     }
@@ -67,7 +68,7 @@ fn warp_per_row(b: &mut Builder, rows: usize) -> (crate::Value, crate::Value) {
     let tid = b.tid();
     let lane = b.and(tid, 31);
     let warp = b.shr(tid, 5);
-    let block = b.ctaid();
+    let block = b.ctaid_x();
     let warps = b.mov(WARPS as u32);
     let row = b.imad(block, warps, warp);
     let past = b.isetp(Cond::Ge, row, rows as u32);
@@ -87,7 +88,7 @@ pub fn copy(n: usize) -> Kernel {
     let value = b.ldg(from, 0);
     let to = b.iadd(dst, offset);
     b.stg(to, 0, value);
-    kernel(b, n.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [n.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
 /// `x[i] += y[i]` for `i < n`.
@@ -104,7 +105,7 @@ pub fn add(n: usize) -> Kernel {
     let c = b.ldg(y_addr, 0);
     let sum = b.fadd(a, c);
     b.stg(x_addr, 0, sum);
-    kernel(b, n.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [n.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
 /// `gate[i] = silu(gate[i]) * up[i]` for `i < n`, where
@@ -126,7 +127,7 @@ pub fn silu_mul(n: usize) -> Kernel {
     let silu = b.fdiv(g, denom);
     let result = b.fmul(silu, u);
     b.stg(gate_addr, 0, result);
-    kernel(b, n.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [n.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
 /// `out = table[token]`, for a bf16 table with rows of `dim` elements. Each
@@ -150,7 +151,7 @@ pub fn embed(dim: usize) -> Kernel {
     let to = b.iadd(out, out_offset);
     b.stg(to, 0, first);
     b.stg(to, 4, second);
-    kernel(b, pairs.div_ceil(BLOCK), BLOCK, 0)
+    kernel(b, [pairs.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
 /// `out = w · x` for a bf16 matrix `w` of shape `[rows, cols]`.
@@ -197,7 +198,7 @@ pub fn matvec(rows: usize, cols: usize) -> Kernel {
     let to = b.iadd(out, row_offset);
     let first = b.isetp(Cond::Eq, lane, 0);
     b.when(first, |b| b.stg(to, 0, sum));
-    kernel(b, rows.div_ceil(WARPS), WARPS * 32, 0)
+    kernel(b, [rows.div_ceil(WARPS), 1], WARPS * 32, 0)
 }
 
 /// Normalizes each of `rows` rows of `x`, each `dim` elements long, by its
@@ -244,7 +245,7 @@ pub fn rmsnorm(rows: usize, dim: usize, eps: f32) -> Kernel {
             b.stg(x_addr, step * 256 + half, y);
         }
     }
-    kernel(b, rows.div_ceil(WARPS), WARPS * 32, 0)
+    kernel(b, [rows.div_ceil(WARPS), 1], WARPS * 32, 0)
 }
 
 /// Rotates each of `n_heads` heads of `x`, each `head_dim` elements long, to
@@ -258,7 +259,7 @@ pub fn rmsnorm(rows: usize, dim: usize, eps: f32) -> Kernel {
 pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
     let half = head_dim / 2;
     let mut b = Builder::new();
-    let (head, i) = (b.ctaid(), b.tid());
+    let (head, i) = (b.ctaid_x(), b.tid());
     let (x, table, pos) = (b.param(0), b.param(1), b.param(2));
     let head_bytes = b.mov((head_dim * 4) as u32);
     let x_head = b.imad(head, head_bytes, x);
@@ -280,7 +281,7 @@ pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
     let second = b.fadd(c_cos, a_sin);
     b.stg(x_addr, 0, first);
     b.stg(x_addr, (half * 4) as u32, second);
-    kernel(b, n_heads, half, 0)
+    kernel(b, [n_heads, 1], half, 0)
 }
 
 /// Causal self-attention: each of `n_heads` query heads in `q` attends over
@@ -312,7 +313,7 @@ pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: us
     let scale = 1.0 / (head_dim as f32).sqrt();
 
     let mut b = Builder::new();
-    let (head, tid) = (b.ctaid(), b.tid());
+    let (head, tid) = (b.ctaid_x(), b.tid());
     let lane = b.and(tid, 31);
     let warp = b.shr(tid, 5);
     let first = b.isetp(Cond::Eq, lane, 0);
@@ -412,5 +413,5 @@ pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: us
     let out_head = b.iadd(out, head_offset);
     let out_addr = b.iadd(out_head, tid_offset);
     b.stg(out_addr, 0, result);
-    kernel(b, n_heads, head_dim, shared)
+    kernel(b, [n_heads, 1], head_dim, shared)
 }

@@ -46,7 +46,8 @@ impl Monitor {
 pub struct KernelInfo {
     /// The operation the kernel computes, with its shape.
     pub name: String,
-    pub grid: u32,
+    /// Blocks along x and y.
+    pub grid: [u32; 2],
     pub block: u32,
     /// Bytes of shared memory per block.
     pub shared: u32,

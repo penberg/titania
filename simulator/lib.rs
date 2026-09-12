@@ -27,8 +27,10 @@ const PT: u8 = 7;
 /// Special registers, read with `S2R` (§2.3).
 const SR_TID: u32 = 0;
 const SR_NTID: u32 = 1;
-const SR_CTAID: u32 = 2;
-const SR_NCTAID: u32 = 3;
+const SR_CTAID_X: u32 = 2;
+const SR_NCTAID_X: u32 = 3;
+const SR_CTAID_Y: u32 = 4;
+const SR_NCTAID_Y: u32 = 5;
 
 /// The canonical NaN every floating-point operation produces (§4).
 const CANONICAL_NAN: u32 = 0x7fc0_0000;
@@ -161,7 +163,7 @@ fn decode(word: u64) -> Option<Inst> {
         Format::Setp => rd < 8 && rc == 0 && (!has_imm || rb == 0),
         Format::Load => has_imm && rb == 0,
         Format::Store => has_imm && rd == 0,
-        Format::Special => has_imm && ra == 0 && rb == 0 && high <= SR_NCTAID,
+        Format::Special => has_imm && ra == 0 && rb == 0 && high <= SR_NCTAID_Y,
         Format::Branch => has_imm && rd == 0 && ra == 0 && rb == 0,
         Format::None => !has_imm && rd == 0 && ra == 0 && rb == 0 && rc == 0,
     };
@@ -234,7 +236,8 @@ impl Activity {
 pub struct Launch<'a> {
     /// The kernel's encoded instructions.
     pub program: &'a [u64],
-    pub grid: u32,
+    /// Blocks along x and y.
+    pub grid: [u32; 2],
     pub block: u32,
     /// Bytes of shared memory per block.
     pub shared: u32,
@@ -304,7 +307,8 @@ impl Simulator {
 
     /// Runs a kernel to completion.
     pub fn launch(&self, launch: &Launch) -> Result<(), Error> {
-        if launch.grid == 0 {
+        let [width, height] = launch.grid;
+        if width == 0 || height == 0 {
             return Err(Error::InvalidLaunch("the grid is empty"));
         }
         if !(1..=1024).contains(&launch.block) {
@@ -325,13 +329,15 @@ impl Simulator {
 
         self.activity.launches.fetch_add(1, Relaxed);
         self.activity.record(Sample { block: 0, warp: 0, pc: 0 });
-        (0..launch.grid).into_par_iter().try_for_each(|id| {
+        (0..width * height).into_par_iter().try_for_each(|id| {
             Block {
                 memory: &self.memory,
                 activity: &self.activity,
                 program: &program,
                 launch,
                 id,
+                x: id % width,
+                y: id / width,
                 shared: vec![0; launch.shared as usize / 4],
             }
             .run()
@@ -345,7 +351,10 @@ struct Block<'a> {
     activity: &'a Activity,
     program: &'a [Inst],
     launch: &'a Launch<'a>,
+    /// The block's number in row-major order, for the monitor.
     id: u32,
+    x: u32,
+    y: u32,
     shared: Vec<u32>,
 }
 
@@ -503,8 +512,10 @@ impl Block<'_> {
                     let value = match imm {
                         SR_TID => w.id * WARP_SIZE + lane as u32,
                         SR_NTID => self.launch.block,
-                        SR_CTAID => self.id,
-                        SR_NCTAID => self.launch.grid,
+                        SR_CTAID_X => self.x,
+                        SR_NCTAID_X => self.launch.grid[0],
+                        SR_CTAID_Y => self.y,
+                        SR_NCTAID_Y => self.launch.grid[1],
                         _ => unreachable!("decode checks the special register"),
                     };
                     w.set(inst.rd, lane, value);
@@ -697,10 +708,35 @@ mod tests {
             inst(STG, 0, 4, 2, Some(0)),
             inst(EXIT, 0, 0, 0, None),
         ]);
-        sim.launch(&Launch { program: &program, grid: 1, block: 64, shared: 0, params: &[out] })
+        sim.launch(&Launch { program: &program, grid: [1, 1], block: 64, shared: 0, params: &[out] })
             .unwrap();
         let expected: Vec<u32> = (0..64).map(|tid| if tid < 32 { 496 } else { 1520 }).collect();
         assert_eq!(sim.read(out, 64), expected);
+    }
+
+    /// One thread per block writes `x + 10y` to `out[x + 4y]` in a 4×3 grid.
+    #[test]
+    fn grid_is_two_dimensional() {
+        let mut sim = Simulator::new();
+        let out = sim.alloc(12 * 4);
+        let program = [
+            inst(S2R, 1, 0, 0, Some(SR_CTAID_X)),
+            inst(S2R, 2, 0, 0, Some(SR_CTAID_Y)),
+            inst(S2R, 3, 0, 0, Some(SR_NCTAID_X)),
+            // r4 = r2 * r3 + r1, with `rc` in the high word.
+            inst(IMAD, 4, 2, 3, None) | (1 << 32),
+            inst(SHL, 5, 4, 0, Some(2)),
+            inst(LDP, 6, 0, 0, Some(0)),
+            inst(IADD, 6, 6, 5, None),
+            inst(IMUL, 7, 2, 0, Some(10)),
+            inst(IADD, 7, 7, 1, None),
+            inst(STG, 0, 6, 7, Some(0)),
+            inst(EXIT, 0, 0, 0, None),
+        ];
+        sim.launch(&Launch { program: &program, grid: [4, 3], block: 1, shared: 0, params: &[out] })
+            .unwrap();
+        let expected: Vec<u32> = (0..3).flat_map(|y| (0..4).map(move |x| x + 10 * y)).collect();
+        assert_eq!(sim.read(out, 12), expected);
     }
 
     #[test]
@@ -714,7 +750,7 @@ mod tests {
             branch,
             inst(EXIT, 0, 0, 0, None),
         ];
-        let result = sim.launch(&Launch { program: &program, grid: 1, block: 32, shared: 0, params: &[] });
+        let result = sim.launch(&Launch { program: &program, grid: [1, 1], block: 32, shared: 0, params: &[] });
         assert!(matches!(result, Err(Error::DivergentBranch { pc: 2 })));
     }
 
@@ -723,7 +759,7 @@ mod tests {
         assert!(decode(0).is_none(), "unknown opcode");
         assert!(decode(inst(EXIT, 1, 0, 0, None)).is_none(), "EXIT with a destination");
         assert!(decode(inst(LDG, 1, 2, 0, None)).is_none(), "load without an offset");
-        assert!(decode(inst(S2R, 1, 0, 0, Some(4))).is_none(), "unknown special register");
+        assert!(decode(inst(S2R, 1, 0, 0, Some(6))).is_none(), "unknown special register");
         assert!(decode(inst(FFMA, 1, 2, 3, Some(0))).is_some());
     }
 
