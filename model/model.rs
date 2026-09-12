@@ -2,6 +2,11 @@ use std::path::Path;
 
 use crate::{Config, Device, Result, Weights};
 
+/// Most tokens a forward pass runs through the model at once. Running a
+/// batch of tokens together reads each weight once for the whole batch,
+/// rather than once per token; the activations are allocated for this many.
+pub const BATCH: usize = 64;
+
 /// A decoder-only transformer, with its weights on a device.
 pub struct Model<D: Device> {
     pub config: Config,
@@ -71,22 +76,34 @@ impl<D: Device> Model<D> {
         })
     }
 
-    /// Runs `token` at position `pos` through the model, adding its keys and
-    /// values to the cache in `state`, and returns the logits for the token
-    /// that follows it.
-    pub fn forward(&self, state: &mut State<D>, token: u32, pos: usize) -> Vec<f32> {
-        assert!(pos < state.max_len, "position {pos} is past the end of the cache");
+    /// Runs `tokens`, the first at position `pos`, through the model, adding
+    /// their keys and values to the cache in `state`, and returns the logits
+    /// for the token that follows the last of them. Tokens run through the
+    /// model in batches of up to [`BATCH`].
+    pub fn forward(&self, state: &mut State<D>, tokens: &[u32], pos: usize) -> Vec<f32> {
+        assert!(!tokens.is_empty(), "no tokens to run");
+        assert!(pos + tokens.len() <= state.max_len, "tokens past the end of the cache");
+        let mut logits = Vec::new();
+        for (i, batch) in tokens.chunks(BATCH).enumerate() {
+            logits = self.forward_batch(state, batch, pos + i * BATCH);
+        }
+        logits
+    }
+
+    fn forward_batch(&self, state: &mut State<D>, tokens: &[u32], pos: usize) -> Vec<f32> {
         let c = &self.config;
         let d = &self.device;
         let s = state;
+        let n = tokens.len();
         let eps = c.rms_norm_eps;
         let head_dim = c.head_dim();
         let kv_dim = c.num_key_value_heads * head_dim;
+        s.batch(d, n);
 
-        d.embed(&mut s.x, &self.embed, &[token]);
+        d.embed(&mut s.x, &self.embed, tokens);
         for (i, layer) in self.layers.iter().enumerate() {
             // Attention, with the result added back into the residual stream.
-            d.copy(&mut s.xb, 0, &s.x, 0, c.hidden_size);
+            d.copy(&mut s.xb, 0, &s.x, 0, n * c.hidden_size);
             d.rmsnorm(&mut s.xb, &layer.attn_norm, eps);
             d.matmul(&mut s.q, &layer.q, &s.xb);
             d.matmul(&mut s.k, &layer.k, &s.xb);
@@ -99,8 +116,8 @@ impl<D: Device> Model<D> {
             }
             d.rope(&mut s.q, pos, c.num_attention_heads, head_dim, c.rope_theta);
             d.rope(&mut s.k, pos, c.num_key_value_heads, head_dim, c.rope_theta);
-            d.copy(&mut s.k_cache[i], pos * kv_dim, &s.k, 0, kv_dim);
-            d.copy(&mut s.v_cache[i], pos * kv_dim, &s.v, 0, kv_dim);
+            d.copy(&mut s.k_cache[i], pos * kv_dim, &s.k, 0, n * kv_dim);
+            d.copy(&mut s.v_cache[i], pos * kv_dim, &s.v, 0, n * kv_dim);
             d.attention(
                 &mut s.att,
                 &s.q,
@@ -115,7 +132,7 @@ impl<D: Device> Model<D> {
             d.add(&mut s.x, &s.xb);
 
             // Feed-forward network, likewise added back.
-            d.copy(&mut s.xb, 0, &s.x, 0, c.hidden_size);
+            d.copy(&mut s.xb, 0, &s.x, 0, n * c.hidden_size);
             d.rmsnorm(&mut s.xb, &layer.mlp_norm, eps);
             d.matmul(&mut s.gate, &layer.gate, &s.xb);
             d.matmul(&mut s.up, &layer.up, &s.xb);
@@ -123,15 +140,21 @@ impl<D: Device> Model<D> {
             d.matmul(&mut s.xb, &layer.down, &s.gate);
             d.add(&mut s.x, &s.xb);
         }
-        d.rmsnorm(&mut s.x, &self.norm, eps);
-        d.matmul(&mut s.logits, self.lm_head.as_ref().unwrap_or(&self.embed), &s.x);
+        // Only the last token's logits are wanted.
+        d.resize(&mut s.xb, c.hidden_size);
+        d.copy(&mut s.xb, 0, &s.x, (n - 1) * c.hidden_size, c.hidden_size);
+        d.rmsnorm(&mut s.xb, &self.norm, eps);
+        d.matmul(&mut s.logits, self.lm_head.as_ref().unwrap_or(&self.embed), &s.xb);
         d.read(&s.logits)
     }
 }
 
-/// Buffers the forward pass computes in, and the key/value cache holding
-/// every position seen so far.
+/// Buffers the forward pass computes in, with room for a batch of
+/// [`BATCH`] tokens, and the key/value cache holding every position seen so
+/// far.
 pub struct State<D: Device> {
+    /// Activations per token of each buffer, in the order of the fields.
+    widths: [usize; 8],
     x: D::Buffer,
     xb: D::Buffer,
     q: D::Buffer,
@@ -153,15 +176,27 @@ impl<D: Device> State<D> {
         let d = &model.device;
         let q_dim = c.num_attention_heads * c.head_dim();
         let kv_dim = c.num_key_value_heads * c.head_dim();
+        let widths = [
+            c.hidden_size,
+            c.hidden_size,
+            q_dim,
+            kv_dim,
+            kv_dim,
+            q_dim,
+            c.intermediate_size,
+            c.intermediate_size,
+        ];
+        let [x, xb, q, k, v, att, gate, up] = widths.map(|width| d.alloc(BATCH * width));
         Self {
-            x: d.alloc(c.hidden_size),
-            xb: d.alloc(c.hidden_size),
-            q: d.alloc(q_dim),
-            k: d.alloc(kv_dim),
-            v: d.alloc(kv_dim),
-            att: d.alloc(q_dim),
-            gate: d.alloc(c.intermediate_size),
-            up: d.alloc(c.intermediate_size),
+            widths,
+            x,
+            xb,
+            q,
+            k,
+            v,
+            att,
+            gate,
+            up,
             logits: d.alloc(c.vocab_size),
             k_cache: (0..c.num_hidden_layers).map(|_| d.alloc(max_len * kv_dim)).collect(),
             v_cache: (0..c.num_hidden_layers).map(|_| d.alloc(max_len * kv_dim)).collect(),
@@ -171,6 +206,24 @@ impl<D: Device> State<D> {
 
     pub fn max_len(&self) -> usize {
         self.max_len
+    }
+
+    /// Sizes the buffers for a batch of `n` tokens.
+    fn batch(&mut self, device: &D, n: usize) {
+        assert!(n <= BATCH, "a batch of {n} tokens is more than {BATCH}");
+        let buffers = [
+            &mut self.x,
+            &mut self.xb,
+            &mut self.q,
+            &mut self.k,
+            &mut self.v,
+            &mut self.att,
+            &mut self.gate,
+            &mut self.up,
+        ];
+        for (buffer, width) in buffers.into_iter().zip(self.widths) {
+            device.resize(buffer, n * width);
+        }
     }
 }
 
