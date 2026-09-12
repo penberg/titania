@@ -10,7 +10,7 @@ mod sampler;
 mod tokenizer;
 mod weights;
 
-pub use chat::Chat;
+pub use chat::{Chat, ToolCall};
 pub use config::Config;
 pub use cpu::Cpu;
 pub use device::Device;

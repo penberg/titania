@@ -13,6 +13,7 @@ use titania_model::{Chat, Cpu, Model, Sampler, Tokenizer};
 use titania_runtime::{Monitor, Titania};
 
 use crate::fetch::{self, Progress};
+use crate::harness::{self, Harness};
 use crate::logo;
 use crate::models;
 use crate::monitor::Panel;
@@ -82,8 +83,16 @@ enum Reply {
     Fetched,
     /// A monitor for the simulated GPU the model runs on.
     Monitor(Arc<Monitor>),
-    Loaded { tokens: usize },
+    /// The model is loaded, and is reading the system prompt: how many of
+    /// its tokens so far, out of how many.
+    Prompting { read: usize, total: usize },
+    /// The model has read the system prompt and is ready for a message.
+    Ready { tokens: usize },
     Text(String),
+    /// A tool is about to run: its name and how it was called.
+    Call { name: String, detail: String },
+    /// What the tool returned.
+    Output(String),
     Done { tokens: usize },
     Failed(String),
 }
@@ -125,18 +134,30 @@ fn serve<D: titania_model::Device>(
     // Qwen3's recommended sampling settings for replies without thinking.
     let sampler = Sampler::new(0.7, 20, 0.8, seed());
     let mut chat = Chat::new(model, tokenizer, sampler, MAX_LEN)?;
-    let _ = replies.send(Reply::Loaded { tokens: chat.tokens() });
+    chat.system(harness::SYSTEM, |read, total| {
+        let _ = replies.send(Reply::Prompting { read, total });
+    })?;
+    let mut harness = Harness::new(chat);
+    let _ = replies.send(Reply::Ready { tokens: harness.tokens() });
 
     for message in requests {
-        chat.send(&message, |text| {
-            let _ = replies.send(Reply::Text(text.to_string()));
+        harness.send(&message, |event| {
+            let reply = match event {
+                harness::Event::Text(text) => Reply::Text(text.to_string()),
+                harness::Event::Call { name, detail } => Reply::Call {
+                    name: name.to_string(),
+                    detail: detail.to_string(),
+                },
+                harness::Event::Output(output) => Reply::Output(output.to_string()),
+            };
+            let _ = replies.send(reply);
             if stop.load(Ordering::Relaxed) {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
         })?;
-        let _ = replies.send(Reply::Done { tokens: chat.tokens() });
+        let _ = replies.send(Reply::Done { tokens: harness.tokens() });
     }
     Ok(())
 }
@@ -154,6 +175,9 @@ enum Status {
     /// Downloading one of the model's files, since when.
     Downloading { since: Instant, progress: Progress },
     Loading(Instant),
+    /// Reading the system prompt, since when: how many of its tokens so
+    /// far, out of how many.
+    Prompting { since: Instant, read: usize, total: usize },
     Idle,
     /// Reading the prompt, before the first token of the reply.
     Thinking(Instant),
@@ -330,7 +354,14 @@ impl App {
             }
             Reply::Fetched => self.status = Status::Loading(Instant::now()),
             Reply::Monitor(monitor) => self.gpu = Some(Panel::new(monitor)),
-            Reply::Loaded { tokens } => {
+            Reply::Prompting { read, total } => {
+                let since = match self.status {
+                    Status::Prompting { since, .. } => since,
+                    _ => Instant::now(),
+                };
+                self.status = Status::Prompting { since, read, total };
+            }
+            Reply::Ready { tokens } => {
                 self.context = tokens;
                 self.status = Status::Idle;
             }
@@ -350,6 +381,37 @@ impl App {
                     },
                 };
                 self.commit(false);
+            }
+            Reply::Call { name, detail } => {
+                // The text so far is finished; the tool's output and the
+                // rest of the reply follow it.
+                self.reply.truncate(self.reply.trim_end().len());
+                self.commit(true);
+                if self.committed > 0 {
+                    self.lines.push(Line::new());
+                }
+                let detail: Vec<&str> = detail.split_whitespace().collect();
+                self.lines.push(vec![
+                    span("● ").with(logo::green()),
+                    span(name).bold(),
+                    span(format!("({})", detail.join(" "))).dark_grey(),
+                ]);
+                self.reply.clear();
+                self.committed = 0;
+                self.status = Status::Thinking(Instant::now());
+            }
+            Reply::Output(output) => {
+                let (columns, _) = self.screen.size();
+                let output = tui::sanitize(&output);
+                let mut first = true;
+                for line in output.lines() {
+                    for text in tui::wrap(line, columns.saturating_sub(4)) {
+                        let prefix = if first { "  ⎿ " } else { "    " };
+                        first = false;
+                        self.lines.push(vec![span(format!("{prefix}{text}")).dark_grey()]);
+                    }
+                }
+                self.lines.push(Line::new());
             }
             Reply::Done { tokens } => {
                 self.reply.truncate(self.reply.trim_end().len());
@@ -482,6 +544,11 @@ impl App {
                 format!("Loading {}…", self.model),
                 since,
                 format!("{}s", since.elapsed().as_secs()),
+            ),
+            Status::Prompting { since, read, total } => (
+                "Reading system prompt…".to_string(),
+                since,
+                format!("{read}/{total} tokens · {}s", since.elapsed().as_secs()),
             ),
             Status::Thinking(since) => (
                 "Thinking…".to_string(),

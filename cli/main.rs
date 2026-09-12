@@ -1,4 +1,5 @@
 mod fetch;
+mod harness;
 mod logo;
 mod models;
 mod monitor;

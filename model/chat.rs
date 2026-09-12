@@ -1,6 +1,9 @@
 use std::ops::ControlFlow;
 
-use crate::{Device, Model, Result, Sampler, State, Tokenizer};
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::{BATCH, Device, Model, Result, Sampler, State, Tokenizer};
 
 /// A conversation with an instruction-tuned model, in the ChatML format that
 /// Qwen models are trained on:
@@ -11,6 +14,11 @@ use crate::{Device, Model, Result, Sampler, State, Tokenizer};
 /// <|im_start|>assistant
 /// Hi there!<|im_end|>
 /// ```
+///
+/// The model may also call tools, if the system prompt describes them, by
+/// replying with `<tool_call>` blocks. Their results go back to it in a user
+/// turn of `<tool_response>` blocks. `Chat` only speaks the format: what the
+/// tools are and running them is up to the caller.
 ///
 /// The whole conversation stays in the key/value cache, so each turn only
 /// runs the model over its new tokens.
@@ -26,6 +34,22 @@ pub struct Chat<D: Device> {
     end_of_text: u32,
     think: u32,
     think_end: u32,
+    tool_call: u32,
+    tool_call_end: u32,
+}
+
+/// A call the model made to a tool, as written in a `<tool_call>` block.
+#[derive(Debug, Deserialize)]
+pub struct ToolCall {
+    pub name: String,
+    pub arguments: Value,
+}
+
+impl ToolCall {
+    /// Parses the body of a `<tool_call>` block.
+    pub fn parse(text: &str) -> Result<Self> {
+        Ok(serde_json::from_str(text.trim())?)
+    }
 }
 
 impl<D: Device> Chat<D> {
@@ -39,10 +63,30 @@ impl<D: Device> Chat<D> {
             end_of_text: tokenizer.special("<|endoftext|>")?,
             think: tokenizer.special("<think>")?,
             think_end: tokenizer.special("</think>")?,
+            tool_call: tokenizer.special("<tool_call>")?,
+            tool_call_end: tokenizer.special("</tool_call>")?,
             tokenizer,
             sampler,
             len: 0,
         })
+    }
+
+    /// Opens the conversation with a system prompt, reporting how many of
+    /// its tokens the model has read so far, out of how many, as it goes.
+    /// Tags in the prompt, such as `<tool_call>`, are encoded as special
+    /// tokens.
+    pub fn system(&mut self, text: &str, mut on_progress: impl FnMut(usize, usize)) -> Result<()> {
+        if self.len != 0 {
+            return Err("the conversation has already started".into());
+        }
+        let content = self.tokenizer.encode_with_special(text)?;
+        let turn = self.turn("system", content)?;
+        on_progress(0, turn.len());
+        for (i, batch) in turn.chunks(BATCH).enumerate() {
+            self.feed(batch)?;
+            on_progress(i * BATCH + batch.len(), turn.len());
+        }
+        Ok(())
     }
 
     /// Number of tokens in the conversation so far.
@@ -51,14 +95,43 @@ impl<D: Device> Chat<D> {
     }
 
     /// Sends a message from the user, streaming the reply's text to `on_text`
-    /// as it is generated. The reply ends early if `on_text` breaks.
-    pub fn send(&mut self, message: &str, mut on_text: impl FnMut(&str) -> ControlFlow<()>) -> Result<()> {
+    /// as it is generated, and returns the tool calls the reply made, as the
+    /// model wrote them. The reply ends early if `on_text` breaks, and then
+    /// makes no calls.
+    pub fn send(&mut self, message: &str, on_text: impl FnMut(&str) -> ControlFlow<()>) -> Result<Vec<String>> {
+        let content = self.tokenizer.encode(message)?;
+        let turn = self.turn("user", content)?;
+        self.feed(&turn)?;
+        self.generate(on_text)
+    }
+
+    /// Sends the results of the tool calls the last reply made, in order,
+    /// and streams the reply to them like `send`.
+    pub fn respond(&mut self, outputs: &[String], on_text: impl FnMut(&str) -> ControlFlow<()>) -> Result<Vec<String>> {
+        let responses: Vec<String> = outputs
+            .iter()
+            .map(|output| format!("<tool_response>\n{output}\n</tool_response>"))
+            .collect();
+        let content = self.tokenizer.encode_with_special(&responses.join("\n"))?;
+        let turn = self.turn("user", content)?;
+        self.feed(&turn)?;
+        self.generate(on_text)
+    }
+
+    /// Encodes a turn of the conversation around its content's tokens.
+    fn turn(&self, role: &str, content: Vec<u32>) -> Result<Vec<u32>> {
+        let mut turn = vec![self.im_start];
+        turn.extend(self.tokenizer.encode(&format!("{role}\n"))?);
+        turn.extend(content);
+        turn.push(self.im_end);
+        turn.extend(self.tokenizer.encode("\n")?);
+        Ok(turn)
+    }
+
+    /// Generates the assistant's reply to the conversation so far.
+    fn generate(&mut self, mut on_text: impl FnMut(&str) -> ControlFlow<()>) -> Result<Vec<String>> {
         let t = &self.tokenizer;
         let mut prompt = vec![self.im_start];
-        prompt.extend(t.encode(&format!("user\n{message}"))?);
-        prompt.push(self.im_end);
-        prompt.extend(t.encode("\n")?);
-        prompt.push(self.im_start);
         prompt.extend(t.encode("assistant\n")?);
         // Qwen3 reasons inside <think> tags before replying; opening the reply
         // with an empty thought makes it answer directly.
@@ -69,17 +142,37 @@ impl<D: Device> Chat<D> {
 
         let mut logits = self.feed(&prompt)?;
         let mut text = Utf8Stream::default();
+        let mut calls = Vec::new();
+        // The body of the tool call being written, if the model is in one.
+        let mut call: Option<String> = None;
+        let mut interrupted = false;
         loop {
             let token = self.sampler.sample(&logits);
             if token == self.im_end || token == self.end_of_text {
                 break;
             }
-            let chunk = text.push(self.tokenizer.decode(token));
-            let flow = if chunk.is_empty() { ControlFlow::Continue(()) } else { on_text(&chunk) };
+            let flow = if token == self.tool_call {
+                call = Some(String::new());
+                ControlFlow::Continue(())
+            } else if token == self.tool_call_end {
+                calls.extend(call.take());
+                ControlFlow::Continue(())
+            } else {
+                let chunk = text.push(self.tokenizer.decode(token));
+                match &mut call {
+                    Some(call) => {
+                        call.push_str(&chunk);
+                        ControlFlow::Continue(())
+                    }
+                    None if chunk.is_empty() => ControlFlow::Continue(()),
+                    None => on_text(&chunk),
+                }
+            };
             // Feed the token even if the reply ends here, so that the model
             // remembers the reply exactly as far as it was shown.
             logits = self.feed(&[token])?;
             if flow.is_break() {
+                interrupted = true;
                 break;
             }
         }
@@ -89,7 +182,7 @@ impl<D: Device> Chat<D> {
         let mut end = vec![self.im_end];
         end.extend(self.tokenizer.encode("\n")?);
         self.feed(&end)?;
-        Ok(())
+        Ok(if interrupted { Vec::new() } else { calls })
     }
 
     /// Runs tokens through the model, returning the logits after the last one.
