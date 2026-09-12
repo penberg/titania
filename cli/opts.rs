@@ -12,24 +12,8 @@ pub struct Opts {
 #[derive(FromArgs)]
 #[argh(subcommand)]
 pub enum Cmd {
-    Fetch(FetchCmd),
-    Models(ModelsCmd),
     Run(RunCmd),
 }
-
-/// Download a model's weights
-#[derive(FromArgs)]
-#[argh(subcommand, name = "fetch")]
-pub struct FetchCmd {
-    /// model to fetch (default: qwen3-0.6b)
-    #[argh(positional, default = "models::DEFAULT.to_string()")]
-    pub model: String,
-}
-
-/// List known models, whether they are downloaded, and where
-#[derive(FromArgs)]
-#[argh(subcommand, name = "models")]
-pub struct ModelsCmd {}
 
 /// Chat with a model, fetching it first if needed
 #[derive(FromArgs)]

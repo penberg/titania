@@ -134,27 +134,6 @@ fn save(
     Ok(())
 }
 
-/// Reports progress on stderr, a line per file, redrawn in place as the file
-/// comes in.
-pub fn report(model: &Model, progress: Progress) {
-    let Progress { file, done, total } = progress;
-    let line = match total {
-        Some(total) => format!(
-            "{}: {file} {} / {} ({}%)",
-            model.name,
-            size(done),
-            size(total),
-            done * 100 / total.max(1)
-        ),
-        None => format!("{}: {file} {}", model.name, size(done)),
-    };
-    eprint!("\r\x1b[2K{line}");
-    if total == Some(done) {
-        eprintln!();
-    }
-    let _ = io::stderr().flush();
-}
-
 /// Formats a byte count for humans, in decimal units.
 pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];

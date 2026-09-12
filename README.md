@@ -57,12 +57,11 @@ Then chat with the model, which is downloaded (about 1.4 GB) on first use:
 titania run
 ```
 
-| Command | What it does |
-|---------|--------------|
-| `titania run` | Chat with the model on the CPU, fetching it first if needed |
-| `titania run --device sim` | Chat with the model on the Titania ISA simulator |
-| `titania models` | List the supported models, whether they are downloaded, and where |
-| `titania fetch` | Download a model ahead of time |
+Or run it on the Titania ISA simulator instead of the CPU:
+
+```console
+titania run --device sim
+```
 
 ---
 

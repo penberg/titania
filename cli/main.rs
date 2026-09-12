@@ -1,5 +1,4 @@
 mod fetch;
-mod list;
 mod logo;
 mod models;
 mod monitor;
@@ -16,12 +15,6 @@ fn main() {
     let opts = parse_args();
 
     let result = match opts.command {
-        Cmd::Fetch(cmd) => fetch::locate(&cmd.model).and_then(|(model, dir)| {
-            fetch::fetch(model, &dir, |progress| fetch::report(model, progress))?;
-            println!("{}", dir.display());
-            Ok(())
-        }),
-        Cmd::Models(_) => list::list(),
         Cmd::Run(cmd) => run::run(&cmd.model, cmd.device),
     };
 

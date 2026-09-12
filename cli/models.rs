@@ -49,39 +49,5 @@ impl Model {
     pub fn dir(&self) -> Option<PathBuf> {
         dirs::cache_dir().map(|dir| dir.join("titania").join("models").join(self.name))
     }
-
-    /// How many of the model's files are present locally.
-    pub fn status(&self) -> Status {
-        let Some(dir) = self.dir() else {
-            return Status::Missing;
-        };
-        let present = self
-            .files
-            .iter()
-            .filter(|file| dir.join(file).exists())
-            .count();
-        match present {
-            0 => Status::Missing,
-            n if n == self.files.len() => Status::Downloaded,
-            _ => Status::Incomplete,
-        }
-    }
 }
 
-/// Whether a model's files are present locally.
-pub enum Status {
-    Downloaded,
-    Incomplete,
-    Missing,
-}
-
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let status = match self {
-            Status::Downloaded => "downloaded",
-            Status::Incomplete => "incomplete",
-            Status::Missing => "not downloaded",
-        };
-        f.pad(status)
-    }
-}
