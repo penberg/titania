@@ -94,7 +94,7 @@ Titania is made up of five layers:
 | **ISA Simulator** | The reference implementation of the ISA | [`simulator/`](simulator), [`runtime/`](runtime) |
 | **Hardware** | The GPU itself, as an RTL design | Planned |
 
-### Model
+### 🧠 Model
 
 The model is what the whole system exists to run. It is a decoder-only
 transformer, the same kind of architecture behind today's large language
@@ -104,7 +104,7 @@ kernels (matrix multiplications, normalization, attention, and activation
 functions), and those kernels define the workload that every layer below must
 support.
 
-### Compiler
+### ⚙️ Compiler
 
 The compiler turns the model's kernels into programs for the Titania ISA.
 Kernels are written in an ordinary high-level GPU programming language, not a
@@ -113,7 +113,7 @@ selects instructions, allocates registers, and lays out the program. Nobody
 writes assembly by hand. The compiler targets the ISA rather than the hardware,
 so it needs no knowledge of how the GPU is built.
 
-### ISA
+### 📐 ISA
 
 The instruction set architecture (ISA) is the contract between software and
 hardware. It defines the GPU's programming model: the instructions, the
@@ -124,7 +124,7 @@ built, and the GPU can evolve without breaking compiled programs. The
 [Titania GPU Architecture Reference Manual](docs/architecture-reference.md)
 defines it in full.
 
-### ISA Simulator
+### 🧪 ISA Simulator
 
 The ISA simulator is the reference implementation of the ISA: a program that
 executes Titania instructions in software. It models *what* each instruction
@@ -132,7 +132,7 @@ does, not *how long* it takes, which keeps it simple enough to serve as the
 definition of correct behavior. It is where the model first runs end to end,
 and every result the hardware produces is checked against it.
 
-### Hardware
+### 🔌 Hardware
 
 The hardware is the GPU itself: a digital design, described at the
 register-transfer level (RTL), that executes the Titania ISA. It fetches
