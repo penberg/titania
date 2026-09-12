@@ -114,8 +114,8 @@ impl<D: Device> Model<D> {
             if let Some(k_norm) = &layer.k_norm {
                 d.rmsnorm(&mut s.k, k_norm, eps);
             }
-            d.rope(&mut s.q, pos, c.num_attention_heads, head_dim, c.rope_theta);
-            d.rope(&mut s.k, pos, c.num_key_value_heads, head_dim, c.rope_theta);
+            d.rope(&mut s.q, &s.rope, pos, c.num_attention_heads, head_dim);
+            d.rope(&mut s.k, &s.rope, pos, c.num_key_value_heads, head_dim);
             d.copy(&mut s.k_cache[i], pos * kv_dim, &s.k, 0, n * kv_dim);
             d.copy(&mut s.v_cache[i], pos * kv_dim, &s.v, 0, n * kv_dim);
             d.attention(
@@ -150,8 +150,9 @@ impl<D: Device> Model<D> {
 }
 
 /// Buffers the forward pass computes in, with room for a batch of
-/// [`BATCH`] tokens, and the key/value cache holding every position seen so
-/// far.
+/// [`BATCH`] tokens, the key/value cache holding every position seen so far,
+/// and the rotary position embedding table for every position there is room
+/// for.
 pub struct State<D: Device> {
     /// Activations per token of each buffer, in the order of the fields.
     widths: [usize; 8],
@@ -166,6 +167,7 @@ pub struct State<D: Device> {
     logits: D::Buffer,
     k_cache: Vec<D::Buffer>,
     v_cache: Vec<D::Buffer>,
+    rope: D::Buffer,
     max_len: usize,
 }
 
@@ -187,6 +189,9 @@ impl<D: Device> State<D> {
             c.intermediate_size,
         ];
         let [x, xb, q, k, v, att, gate, up] = widths.map(|width| d.alloc(BATCH * width));
+        let table = rope_table(max_len, c.head_dim(), c.rope_theta);
+        let mut rope = d.alloc(table.len());
+        d.write(&mut rope, &table);
         Self {
             widths,
             x,
@@ -200,6 +205,7 @@ impl<D: Device> State<D> {
             logits: d.alloc(c.vocab_size),
             k_cache: (0..c.num_hidden_layers).map(|_| d.alloc(max_len * kv_dim)).collect(),
             v_cache: (0..c.num_hidden_layers).map(|_| d.alloc(max_len * kv_dim)).collect(),
+            rope,
             max_len,
         }
     }
@@ -225,6 +231,22 @@ impl<D: Device> State<D> {
             device.resize(buffer, n * width);
         }
     }
+}
+
+/// The cosines and sines of the angles rotary position embeddings rotate
+/// by, laid out as [`Device::rope`] expects, for positions up to `max_len`.
+/// Each of a head's pairs of elements rotates at its own frequency.
+fn rope_table(max_len: usize, head_dim: usize, theta: f32) -> Vec<f32> {
+    let half = head_dim / 2;
+    let mut table = Vec::with_capacity(max_len * head_dim);
+    for pos in 0..max_len {
+        for i in 0..half {
+            let freq = 1.0 / theta.powf((2 * i) as f32 / head_dim as f32);
+            let (sin, cos) = (pos as f32 * freq).sin_cos();
+            table.extend([cos, sin]);
+        }
+    }
+    table
 }
 
 fn load<D: Device>(device: &D, weights: &mut Weights, name: &str) -> Result<D::Weight> {

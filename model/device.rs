@@ -28,6 +28,9 @@ pub trait Device {
     /// Copies a buffer out of device memory.
     fn read(&self, buf: &Self::Buffer) -> Vec<f32>;
 
+    /// Copies `data` into a buffer of the same length.
+    fn write(&self, buf: &mut Self::Buffer, data: &[f32]);
+
     /// `dst[dst_offset..][..len] = src[src_offset..][..len]`
     fn copy(
         &self,
@@ -57,8 +60,10 @@ pub trait Device {
     /// Rotates each `head_dim`-long head of `x`, which holds `n_heads` heads
     /// per token, to encode the token's position (rotary position
     /// embeddings): `pos` for the first token, `pos + 1` for the next, and so
-    /// on.
-    fn rope(&self, x: &mut Self::Buffer, pos: usize, n_heads: usize, head_dim: usize, theta: f32);
+    /// on. Element `i` of a head at position `p` pairs with element
+    /// `i + head_dim / 2`, rotated by the angle whose cosine and sine are at
+    /// `table[(p * head_dim / 2 + i) * 2..][..2]`.
+    fn rope(&self, x: &mut Self::Buffer, table: &Self::Buffer, pos: usize, n_heads: usize, head_dim: usize);
 
     /// Causal self-attention for the tokens in `q`, the first at position
     /// `pos`: each of a token's `n_heads` heads, each `head_dim` long,

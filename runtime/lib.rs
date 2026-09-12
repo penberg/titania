@@ -20,8 +20,6 @@ pub struct Titania {
     sim: RefCell<Simulator>,
     /// Compiled kernels, by operation and shape.
     kernels: RefCell<HashMap<Op, Rc<Compiled>>>,
-    /// Rotary position embedding tables, by head size and base frequency.
-    rope_tables: RefCell<HashMap<(usize, u32), RopeTable>>,
     monitor: Arc<Monitor>,
 }
 
@@ -128,13 +126,6 @@ fn tokens(n: usize) -> String {
     if n > 1 { format!(" · {n} tokens") } else { String::new() }
 }
 
-/// Cosines and sines of every rotation angle, for positions up to
-/// `positions`.
-struct RopeTable {
-    addr: u32,
-    positions: usize,
-}
-
 /// A buffer of `f32` activations in global memory.
 pub struct Buffer {
     addr: u32,
@@ -159,7 +150,6 @@ impl Titania {
         Self {
             sim: RefCell::new(sim),
             kernels: RefCell::default(),
-            rope_tables: RefCell::default(),
             monitor,
         }
     }
@@ -189,31 +179,6 @@ impl Titania {
         if let Err(e) = self.sim.borrow().launch(&launch) {
             panic!("{op:?} failed: {e}\n{}", kernel.disassemble());
         }
-    }
-
-    /// The address of a table with the rotation angles for positions up to at
-    /// least `pos`, computed as the CPU computes them.
-    fn rope_table(&self, head_dim: usize, theta: f32, pos: usize) -> u32 {
-        let key = (head_dim, theta.to_bits());
-        let mut tables = self.rope_tables.borrow_mut();
-        if let Some(table) = tables.get(&key)
-            && pos < table.positions
-        {
-            return table.addr;
-        }
-        let positions = (pos + 1).next_power_of_two().max(4096);
-        let half = head_dim / 2;
-        let mut words = Vec::with_capacity(positions * half * 2);
-        for p in 0..positions {
-            for i in 0..half {
-                let freq = 1.0 / theta.powf((2 * i) as f32 / head_dim as f32);
-                let (sin, cos) = (p as f32 * freq).sin_cos();
-                words.extend([cos.to_bits(), sin.to_bits()]);
-            }
-        }
-        let addr = self.upload_words(&words);
-        tables.insert(key, RopeTable { addr, positions });
-        addr
     }
 
     fn upload_words(&self, words: &[u32]) -> u32 {
@@ -264,6 +229,12 @@ impl Device for Titania {
         self.sim.borrow().read(buf.addr, buf.len).into_iter().map(f32::from_bits).collect()
     }
 
+    fn write(&self, buf: &mut Buffer, data: &[f32]) {
+        assert_eq!(data.len(), buf.len);
+        let words: Vec<u32> = data.iter().map(|x| x.to_bits()).collect();
+        self.sim.borrow().write(buf.addr, &words);
+    }
+
     fn copy(&self, dst: &mut Buffer, dst_offset: usize, src: &Buffer, src_offset: usize, len: usize) {
         assert!(dst_offset + len <= dst.len && src_offset + len <= src.len);
         let params = [dst.addr + (dst_offset * 4) as u32, src.addr + (src_offset * 4) as u32];
@@ -309,11 +280,12 @@ impl Device for Titania {
         self.run(op, &[x.addr, weight.addr]);
     }
 
-    fn rope(&self, x: &mut Buffer, pos: usize, n_heads: usize, head_dim: usize, theta: f32) {
+    fn rope(&self, x: &mut Buffer, table: &Buffer, pos: usize, n_heads: usize, head_dim: usize) {
         let n = x.len / (n_heads * head_dim);
         assert_eq!(x.len, n * n_heads * head_dim);
-        let table = self.rope_table(head_dim, theta, pos + n - 1);
-        self.run(Op::Rope { n_heads, head_dim, n }, &[x.addr, table, pos as u32]);
+        let last = pos + n - 1;
+        assert!((last + 1) * head_dim <= table.len, "position {last} is past the end of the table");
+        self.run(Op::Rope { n_heads, head_dim, n }, &[x.addr, table.addr, pos as u32]);
     }
 
     fn attention(
@@ -376,8 +348,8 @@ mod tests {
     /// A buffer on each device, holding the same numbers.
     fn buffers(gpu: &Titania, n: usize, seed: u32) -> (Vec<f32>, Buffer) {
         let values = numbers(n, seed);
-        let words: Vec<u32> = values.iter().map(|x| x.to_bits()).collect();
-        let buf = Buffer { addr: gpu.upload_words(&words), len: n, capacity: n };
+        let mut buf = gpu.alloc(n);
+        gpu.write(&mut buf, &values);
         (values, buf)
     }
 
@@ -471,8 +443,9 @@ mod tests {
         for n in [1, 3] {
             let gpu = Titania::new();
             let (mut cpu_x, mut x) = buffers(&gpu, n * 4 * 128, 11);
-            Cpu.rope(&mut cpu_x, 37, 4, 128, 1_000_000.0);
-            gpu.rope(&mut x, 37, 4, 128, 1_000_000.0);
+            let (cpu_table, table) = buffers(&gpu, 40 * 128, 16);
+            Cpu.rope(&mut cpu_x, &cpu_table, 37, 4, 128);
+            gpu.rope(&mut x, &table, 37, 4, 128);
             assert_close(&gpu, &x, &cpu_x);
         }
     }

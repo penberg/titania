@@ -27,6 +27,10 @@ impl Device for Cpu {
         buf.clone()
     }
 
+    fn write(&self, buf: &mut Vec<f32>, data: &[f32]) {
+        buf.copy_from_slice(data);
+    }
+
     fn copy(&self, dst: &mut Vec<f32>, dst_offset: usize, src: &Vec<f32>, src_offset: usize, len: usize) {
         dst[dst_offset..][..len].copy_from_slice(&src[src_offset..][..len]);
     }
@@ -89,16 +93,15 @@ impl Device for Cpu {
         }
     }
 
-    fn rope(&self, x: &mut Vec<f32>, pos: usize, n_heads: usize, head_dim: usize, theta: f32) {
+    fn rope(&self, x: &mut Vec<f32>, table: &Vec<f32>, pos: usize, n_heads: usize, head_dim: usize) {
         // Each head is rotated as pairs of elements half a head apart, each
-        // pair at its own frequency.
+        // pair by its own angle.
         let half = head_dim / 2;
         for (t, token) in x.chunks_exact_mut(n_heads * head_dim).enumerate() {
-            let pos = pos + t;
+            let angles = &table[(pos + t) * head_dim..][..head_dim];
             for head in token.chunks_exact_mut(head_dim) {
-                for i in 0..half {
-                    let freq = 1.0 / theta.powf((2 * i) as f32 / head_dim as f32);
-                    let (sin, cos) = (pos as f32 * freq).sin_cos();
+                for (i, angle) in angles.chunks_exact(2).enumerate() {
+                    let (cos, sin) = (angle[0], angle[1]);
                     let (a, b) = (head[i], head[i + half]);
                     head[i] = a * cos - b * sin;
                     head[i + half] = b * cos + a * sin;
