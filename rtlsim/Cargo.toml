@@ -1,0 +1,14 @@
+[package]
+name = "titania-rtlsim"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+titania-simulator = { version = "0.1.0", path = "../simulator" }
+
+[build-dependencies]
+cc = "1.2"

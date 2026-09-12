@@ -9,4 +9,5 @@ path = "lib.rs"
 [dependencies]
 titania-compiler = { version = "0.1.0", path = "../compiler" }
 titania-model = { version = "0.1.0", path = "../model" }
+titania-rtlsim = { version = "0.1.0", path = "../rtlsim" }
 titania-simulator = { version = "0.1.0", path = "../simulator" }

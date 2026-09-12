@@ -30,8 +30,8 @@ single person can read, understand, and implement all of it.
 - **🌙 A real model.** Titania runs Qwen3-0.6B, a decoder-only transformer of
   the same kind as today's large language models, and you can chat with it.
 - **🧩 Every layer, end to end.** The model's kernels are compiled to the
-  Titania ISA and executed by the ISA simulator, today. An RTL GPU, an FPGA,
-  and silicon come next.
+  Titania ISA and run on the ISA simulator and on an RTL GPU design, today.
+  An FPGA and silicon come next.
 - **📜 One source of truth.** The ISA simulator defines what every instruction
   does, and the hardware must produce bit-for-bit the same results.
 - **📖 Small enough to read.** No layer is a black box: each is written to be
@@ -65,6 +65,13 @@ Or run it on the Titania ISA simulator instead of the CPU:
 titania run --device sim
 ```
 
+Or on the RTL simulator of the Titania GPU design, if [Verilator] was
+installed when `titania` was built:
+
+```console
+titania run --device rtlsim
+```
+
 The model has a `bash` tool, so asking it about the files or the system you
 are on makes it run a command and read the output. Commands run without
 confirmation.
@@ -86,6 +93,13 @@ executing.
 
 <p align="center"><em>Sped up: on the simulator, the model generates about a token per second.</em></p>
 
+`titania run --device rtlsim` goes one layer further and runs the model on the
+RTL simulator of the Titania GPU design, with the same panel showing the
+kernels being launched and where their warps are, plus the cycle count and
+clock rate. The RTL simulator needs [Verilator] installed when `titania` is
+built; it simulates the GPU cycle by cycle, so a token takes minutes rather
+than milliseconds.
+
 ---
 
 ## Blueprint
@@ -98,7 +112,7 @@ Titania is made up of five layers:
 | **Compiler** | Lowers the model's kernels to Titania ISA programs | [`compiler/`](compiler) |
 | **ISA** | The contract between software and hardware | [`docs/architecture-reference.md`](docs/architecture-reference.md) |
 | **ISA Simulator** | The reference implementation of the ISA | [`simulator/`](simulator), [`runtime/`](runtime) |
-| **Hardware** | The GPU itself, as an RTL design | Planned |
+| **Hardware** | The GPU itself, as an RTL design | [`rtl/`](rtl), [`rtlsim/`](rtlsim) |
 
 ### 🧠 Model
 
@@ -147,6 +161,14 @@ does the arithmetic. The design first runs in an RTL simulator, where every
 program must produce the same results as on the ISA simulator. It is then
 synthesized onto an FPGA, and eventually manufactured as silicon.
 
+The design lives in `rtl/`: a chip of streaming
+multiprocessors, each running the warps of one block through a short
+pipeline, with a dispatcher that hands them blocks and a port to global
+memory each. The [microarchitecture document](docs/gpu-microarchitecture.md)
+describes it. `titania-rtlsim` compiles it with Verilator and runs it behind
+the same interface as the ISA simulator, and its tests check every
+instruction against the simulator bit for bit.
+
 ---
 
 ## Milestones
@@ -154,7 +176,7 @@ synthesized onto an FPGA, and eventually manufactured as silicon.
 - [x] Model runs on CPU
 - [x] Compiler emits Titania ISA
 - [x] Model runs on ISA simulator
-- [ ] Model runs on RTL simulator
+- [x] Model runs on RTL simulator
 - [ ] Model runs on FPGA
 - [ ] Tapeout
 
@@ -171,3 +193,4 @@ for inclusion in Titania by you, shall be licensed as MIT, without any additiona
 terms or conditions.
 
 [MIT license]: LICENSE.md
+[Verilator]: https://verilator.org

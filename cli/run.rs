@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::Stylize;
 use titania_model::{Chat, Cpu, Model, Sampler, Tokenizer};
-use titania_runtime::{Monitor, Titania};
+use titania_runtime::{Monitor, Rtlsim, Simulator, Titania};
 
 use crate::fetch::{self, Progress};
 use crate::harness::{self, Harness};
@@ -114,7 +114,12 @@ fn work(
     match device {
         Device::Cpu => serve(dir, Cpu, requests, replies, stop),
         Device::Sim => {
-            let gpu = Titania::new();
+            let gpu = Titania::new(Simulator::new());
+            let _ = replies.send(Reply::Monitor(gpu.monitor()));
+            serve(dir, gpu, requests, replies, stop)
+        }
+        Device::Rtlsim => {
+            let gpu = Titania::new(Rtlsim::new()?);
             let _ = replies.send(Reply::Monitor(gpu.monitor()));
             serve(dir, gpu, requests, replies, stop)
         }
@@ -449,6 +454,7 @@ impl App {
         let device = match self.device {
             Device::Cpu => "CPU",
             Device::Sim => "ISA simulator",
+            Device::Rtlsim => "RTL simulator",
         };
         let dir = match dirs::home_dir().and_then(|home| self.dir.strip_prefix(home).ok()) {
             Some(rest) => format!("~/{}", rest.display()),
@@ -493,8 +499,10 @@ impl App {
         }
 
         // What the GPU is running, in whatever room the input box leaves.
+        // Loading includes the system prompt, which takes a while on a
+        // simulated GPU.
         if let Some(gpu) = &mut self.gpu
-            && matches!(self.status, Status::Thinking(_) | Status::Generating { .. })
+            && matches!(self.status, Status::Loading(_) | Status::Thinking(_) | Status::Generating { .. })
         {
             live.extend(gpu.draw(columns, rows.saturating_sub(live.len() + 4)));
         }
@@ -576,6 +584,7 @@ impl App {
         let device = match self.device {
             Device::Cpu => "cpu",
             Device::Sim => "sim",
+            Device::Rtlsim => "rtlsim",
         };
         let mut left = format!("  {} · {device} · {}/{MAX_LEN} tokens", self.model, self.context);
         if let Some(speed) = self.speed {
