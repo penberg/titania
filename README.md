@@ -38,7 +38,7 @@ single person can read, understand, and implement all of it.
   understood, not just used.
 
 <p align="center">
-  <img src=".github/assets/architecture.svg" width="640" alt="Titania architecture: the model, a transformer, is compiled to the Titania ISA. The GPU, an RTL design, executes the ISA and is synthesized to an FPGA and then an ASIC. The ISA simulator defines the semantics of the ISA, and the GPU is verified against it.">
+  <img src=".github/assets/architecture.svg" width="700" alt="Titania architecture: the model, a transformer, is compiled to the Titania ISA. The GPU, an RTL design, executes the ISA and is synthesized to an FPGA and then an ASIC. The ISA simulator defines the semantics of the ISA, and the GPU is verified against it.">
 </p>
 
 ---
