@@ -80,7 +80,7 @@ impl Compiled {
 enum Op {
     Copy(usize),
     Embed(usize),
-    Matvec(usize, usize),
+    Matmul { rows: usize, cols: usize, n: usize },
     Add(usize),
     Rmsnorm { rows: usize, dim: usize, eps: u32 },
     Rope { n_heads: usize, head_dim: usize },
@@ -93,7 +93,7 @@ impl Op {
         match self {
             Op::Copy(n) => kernels::copy(n),
             Op::Embed(dim) => kernels::embed(dim),
-            Op::Matvec(rows, cols) => kernels::matvec(rows, cols),
+            Op::Matmul { rows, cols, n } => kernels::matmul(rows, cols, n),
             Op::Add(n) => kernels::add(n),
             Op::Rmsnorm { rows, dim, eps } => kernels::rmsnorm(rows, dim, f32::from_bits(eps)),
             Op::Rope { n_heads, head_dim } => kernels::rope(n_heads, head_dim),
@@ -110,7 +110,7 @@ impl fmt::Display for Op {
         match self {
             Op::Copy(n) => write!(f, "copy {n}"),
             Op::Embed(dim) => write!(f, "embed {dim}"),
-            Op::Matvec(rows, cols) => write!(f, "matvec {rows}×{cols}"),
+            Op::Matmul { rows, cols, n } => write!(f, "matmul {rows}×{cols}{}", tokens(*n)),
             Op::Add(n) => write!(f, "add {n}"),
             Op::Rmsnorm { rows, dim, .. } => write!(f, "rmsnorm {rows}×{dim}"),
             Op::Rope { n_heads, head_dim } => write!(f, "rope {n_heads}×{head_dim}"),
@@ -118,6 +118,11 @@ impl fmt::Display for Op {
             Op::SiluMul(n) => write!(f, "silu_mul {n}"),
         }
     }
+}
+
+/// How many tokens an operation runs at once, when more than one.
+fn tokens(n: usize) -> String {
+    if n > 1 { format!(" · {n} tokens") } else { String::new() }
 }
 
 /// Cosines and sines of every rotation angle, for positions up to
@@ -260,7 +265,7 @@ impl Device for Titania {
 
     fn matvec(&self, out: &mut Buffer, w: &Weight, x: &Buffer) {
         assert_eq!(w.shape, [out.len, x.len]);
-        self.run(Op::Matvec(out.len, x.len), &[out.addr, w.addr, x.addr]);
+        self.run(Op::Matmul { rows: out.len, cols: x.len, n: 1 }, &[out.addr, w.addr, x.addr]);
     }
 
     fn add(&self, x: &mut Buffer, y: &Buffer) {
@@ -386,16 +391,27 @@ mod tests {
         assert_close(&gpu, &out, &cpu_out);
     }
 
+    /// One token, a partial tile, and whole tiles.
     #[test]
-    fn matvec() {
-        for (rows, cols) in [(24, 256), (5, 64), (9, 384)] {
+    fn matmul() {
+        for (rows, cols, n) in [(24, 256, 1), (5, 64, 3), (9, 384, 16)] {
             let gpu = Titania::new();
             let w = tensor(&[rows, cols], 6);
-            let (cpu_x, x) = buffers(&gpu, cols, 7);
-            let (mut cpu_out, mut out) = buffers(&gpu, rows, 8);
-            Cpu.matvec(&mut cpu_out, &w, &cpu_x);
+            let (cpu_x, x) = buffers(&gpu, n * cols, 7);
+            let (mut cpu_out, mut out) = buffers(&gpu, n * rows, 8);
+            // The CPU multiplies one token at a time.
+            for (out, x) in cpu_out.chunks_exact_mut(rows).zip(cpu_x.chunks_exact(cols)) {
+                let mut result = vec![0.0; rows];
+                Cpu.matvec(&mut result, &w, &x.to_vec());
+                out.copy_from_slice(&result);
+            }
             let w = gpu.upload(w);
-            gpu.matvec(&mut out, &w, &x);
+            // The device runs the kernel for one token; only the kernel
+            // takes a tile so far.
+            match n {
+                1 => gpu.matvec(&mut out, &w, &x),
+                _ => gpu.run(Op::Matmul { rows, cols, n }, &[out.addr, w.addr, x.addr]),
+            }
             assert_close(&gpu, &out, &cpu_out);
         }
     }

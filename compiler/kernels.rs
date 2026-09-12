@@ -154,16 +154,33 @@ pub fn embed(dim: usize) -> Kernel {
     kernel(b, [pairs.div_ceil(BLOCK), 1], BLOCK, 0)
 }
 
-/// `out = w · x` for a bf16 matrix `w` of shape `[rows, cols]`.
+/// Tokens a warp of `matmul` handles at once: how many times fewer each
+/// weight is read than with one token per warp.
+pub const TILE: usize = 8;
+
+/// `out[t] = w · x[t]` for a bf16 matrix `w` of shape `[rows, cols]` and `n`
+/// tokens, each a row of `cols` activations in `x` and of `rows` results in
+/// `out`.
 ///
-/// Each warp computes one row: lane `l` multiplies words `l`, `l + 32`, ...
-/// of the row, two elements each, and the warp sums the lanes' results.
+/// Each warp computes one row of `w` for a tile of tokens, so that it reads
+/// each weight once for the whole tile: lane `l` multiplies words `l`,
+/// `l + 32`, ... of the row, two elements each, by every token's activations,
+/// and the warp sums the lanes' results. The grid is one block of rows wide
+/// and one tile of tokens high. A tile is `TILE` tokens, or all `n` if
+/// fewer, so `n` must be a multiple of `TILE` or at most `TILE`; a caller
+/// splits a batch into a run of full tiles and the remainder.
 ///
 /// Parameters: `out`, `w`, `x`.
-pub fn matvec(rows: usize, cols: usize) -> Kernel {
-    assert!(cols.is_multiple_of(64), "matvec needs a multiple of 64 columns, got {cols}");
+pub fn matmul(rows: usize, cols: usize, n: usize) -> Kernel {
+    assert!(cols.is_multiple_of(64), "matmul needs a multiple of 64 columns, got {cols}");
+    let tile = n.min(TILE);
+    assert!(n.is_multiple_of(tile), "matmul needs a multiple of {TILE} tokens or at most {TILE}, got {n}");
     let steps = cols / 64;
-    let unroll = [4, 2, 1].into_iter().find(|u| steps.is_multiple_of(*u)).unwrap();
+    // Unroll the loop over the columns, as far as the tile is small.
+    let unroll = [4, 2, 1]
+        .into_iter()
+        .find(|u| steps.is_multiple_of(*u) && u * tile <= TILE)
+        .unwrap();
     let mut b = Builder::new();
     let (lane, row) = warp_per_row(&mut b, rows);
     let (out, w, x) = (b.param(0), b.param(1), b.param(2));
@@ -171,34 +188,49 @@ pub fn matvec(rows: usize, cols: usize) -> Kernel {
     let w_row = b.imad(row, row_bytes, w);
     let lane_word = b.shl(lane, 2);
     let w_addr = b.iadd(w_row, lane_word);
+    // The lane's pair of activations for each token of the tile.
+    let tile_id = b.ctaid_y();
+    let tile_bytes = b.mov((tile * cols * 4) as u32);
+    let x_tile = b.imad(tile_id, tile_bytes, x);
     let lane_pair = b.shl(lane, 3);
-    let x_addr = b.iadd(x, lane_pair);
-    let even = b.mov(0.0f32);
-    let odd = b.mov(0.0f32);
+    let x_first = b.iadd(x_tile, lane_pair);
+    let x_addr: Vec<_> = (0..tile)
+        .map(|t| if t == 0 { x_first } else { b.iadd(x_first, (t * cols * 4) as u32) })
+        .collect();
+    let even: Vec<_> = (0..tile).map(|_| b.mov(0.0f32)).collect();
+    let odd: Vec<_> = (0..tile).map(|_| b.mov(0.0f32)).collect();
     b.for_range(0u32, steps as u32, unroll as u32, |b, _| {
         for u in 0..unroll as u32 {
             let word = b.ldg(w_addr, u * 128);
-            let x0 = b.ldg(x_addr, u * 256);
-            let x1 = b.ldg(x_addr, u * 256 + 4);
             let w0 = b.shl(word, 16);
             let w1 = b.and(word, HIGH_HALF);
-            let sum = b.ffma(w0, x0, even);
-            b.assign(even, sum);
-            let sum = b.ffma(w1, x1, odd);
-            b.assign(odd, sum);
+            for t in 0..tile {
+                let x0 = b.ldg(x_addr[t], u * 256);
+                let x1 = b.ldg(x_addr[t], u * 256 + 4);
+                let sum = b.ffma(w0, x0, even[t]);
+                b.assign(even[t], sum);
+                let sum = b.ffma(w1, x1, odd[t]);
+                b.assign(odd[t], sum);
+            }
         }
         let next = b.iadd(w_addr, 128 * unroll as u32);
         b.assign(w_addr, next);
-        let next = b.iadd(x_addr, 256 * unroll as u32);
-        b.assign(x_addr, next);
+        for &x_addr in &x_addr {
+            let next = b.iadd(x_addr, 256 * unroll as u32);
+            b.assign(x_addr, next);
+        }
     });
-    let partial = b.fadd(even, odd);
-    let sum = b.warp_sum(partial);
+    let out_tile_bytes = b.mov((tile * rows * 4) as u32);
+    let out_tile = b.imad(tile_id, out_tile_bytes, out);
     let row_offset = b.shl(row, 2);
-    let to = b.iadd(out, row_offset);
+    let to = b.iadd(out_tile, row_offset);
     let first = b.isetp(Cond::Eq, lane, 0);
-    b.when(first, |b| b.stg(to, 0, sum));
-    kernel(b, [rows.div_ceil(WARPS), 1], WARPS * 32, 0)
+    for t in 0..tile {
+        let partial = b.fadd(even[t], odd[t]);
+        let sum = b.warp_sum(partial);
+        b.when(first, |b| b.stg(to, (t * rows * 4) as u32, sum));
+    }
+    kernel(b, [rows.div_ceil(WARPS), n / tile], WARPS * 32, 0)
 }
 
 /// Normalizes each of `rows` rows of `x`, each `dim` elements long, by its
