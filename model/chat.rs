@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{Device, Model, Result, Sampler, State, Tokenizer};
+use crate::{BATCH, Device, Model, Result, Sampler, State, Tokenizer};
 
 /// A conversation with an instruction-tuned model, in the ChatML format that
 /// Qwen models are trained on:
@@ -53,16 +53,9 @@ impl ToolCall {
 }
 
 impl<D: Device> Chat<D> {
-    /// Starts a conversation with room for `max_len` tokens, opening with
-    /// the system prompt, if any.
-    pub fn new(
-        model: Model<D>,
-        tokenizer: Tokenizer,
-        sampler: Sampler,
-        max_len: usize,
-        system: Option<&str>,
-    ) -> Result<Self> {
-        let mut chat = Self {
+    /// Starts a conversation with room for `max_len` tokens.
+    pub fn new(model: Model<D>, tokenizer: Tokenizer, sampler: Sampler, max_len: usize) -> Result<Self> {
+        Ok(Self {
             state: State::new(&model, max_len),
             model,
             im_start: tokenizer.special("<|im_start|>")?,
@@ -75,13 +68,25 @@ impl<D: Device> Chat<D> {
             tokenizer,
             sampler,
             len: 0,
-        };
-        if let Some(system) = system {
-            let content = chat.tokenizer.encode_with_special(system)?;
-            let turn = chat.turn("system", content)?;
-            chat.feed(&turn)?;
+        })
+    }
+
+    /// Opens the conversation with a system prompt, reporting how many of
+    /// its tokens the model has read so far, out of how many, as it goes.
+    /// Tags in the prompt, such as `<tool_call>`, are encoded as special
+    /// tokens.
+    pub fn system(&mut self, text: &str, mut on_progress: impl FnMut(usize, usize)) -> Result<()> {
+        if self.len != 0 {
+            return Err("the conversation has already started".into());
         }
-        Ok(chat)
+        let content = self.tokenizer.encode_with_special(text)?;
+        let turn = self.turn("system", content)?;
+        on_progress(0, turn.len());
+        for (i, batch) in turn.chunks(BATCH).enumerate() {
+            self.feed(batch)?;
+            on_progress(i * BATCH + batch.len(), turn.len());
+        }
+        Ok(())
     }
 
     /// Number of tokens in the conversation so far.

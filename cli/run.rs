@@ -83,7 +83,11 @@ enum Reply {
     Fetched,
     /// A monitor for the simulated GPU the model runs on.
     Monitor(Arc<Monitor>),
-    Loaded { tokens: usize },
+    /// The model is loaded, and is reading the system prompt: how many of
+    /// its tokens so far, out of how many.
+    Prompting { read: usize, total: usize },
+    /// The model has read the system prompt and is ready for a message.
+    Ready { tokens: usize },
     Text(String),
     /// A tool is about to run: its name and how it was called.
     Call { name: String, detail: String },
@@ -129,9 +133,12 @@ fn serve<D: titania_model::Device>(
     let tokenizer = Tokenizer::load(&dir.join("tokenizer.json"))?;
     // Qwen3's recommended sampling settings for replies without thinking.
     let sampler = Sampler::new(0.7, 20, 0.8, seed());
-    let chat = Chat::new(model, tokenizer, sampler, MAX_LEN, Some(harness::SYSTEM))?;
+    let mut chat = Chat::new(model, tokenizer, sampler, MAX_LEN)?;
+    chat.system(harness::SYSTEM, |read, total| {
+        let _ = replies.send(Reply::Prompting { read, total });
+    })?;
     let mut harness = Harness::new(chat);
-    let _ = replies.send(Reply::Loaded { tokens: harness.tokens() });
+    let _ = replies.send(Reply::Ready { tokens: harness.tokens() });
 
     for message in requests {
         harness.send(&message, |event| {
@@ -168,6 +175,9 @@ enum Status {
     /// Downloading one of the model's files, since when.
     Downloading { since: Instant, progress: Progress },
     Loading(Instant),
+    /// Reading the system prompt, since when: how many of its tokens so
+    /// far, out of how many.
+    Prompting { since: Instant, read: usize, total: usize },
     Idle,
     /// Reading the prompt, before the first token of the reply.
     Thinking(Instant),
@@ -344,7 +354,14 @@ impl App {
             }
             Reply::Fetched => self.status = Status::Loading(Instant::now()),
             Reply::Monitor(monitor) => self.gpu = Some(Panel::new(monitor)),
-            Reply::Loaded { tokens } => {
+            Reply::Prompting { read, total } => {
+                let since = match self.status {
+                    Status::Prompting { since, .. } => since,
+                    _ => Instant::now(),
+                };
+                self.status = Status::Prompting { since, read, total };
+            }
+            Reply::Ready { tokens } => {
                 self.context = tokens;
                 self.status = Status::Idle;
             }
@@ -527,6 +544,11 @@ impl App {
                 format!("Loading {}…", self.model),
                 since,
                 format!("{}s", since.elapsed().as_secs()),
+            ),
+            Status::Prompting { since, read, total } => (
+                "Reading system prompt…".to_string(),
+                since,
+                format!("{read}/{total} tokens · {}s", since.elapsed().as_secs()),
             ),
             Status::Thinking(since) => (
                 "Thinking…".to_string(),
