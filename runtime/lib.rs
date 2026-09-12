@@ -83,8 +83,8 @@ enum Op {
     Matmul { rows: usize, cols: usize, n: usize },
     Add(usize),
     Rmsnorm { rows: usize, dim: usize, eps: u32 },
-    Rope { n_heads: usize, head_dim: usize },
-    Attention { n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize },
+    Rope { n_heads: usize, head_dim: usize, n: usize },
+    Attention { n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize, n: usize },
     SiluMul(usize),
 }
 
@@ -96,9 +96,9 @@ impl Op {
             Op::Matmul { rows, cols, n } => kernels::matmul(rows, cols, n),
             Op::Add(n) => kernels::add(n),
             Op::Rmsnorm { rows, dim, eps } => kernels::rmsnorm(rows, dim, f32::from_bits(eps)),
-            Op::Rope { n_heads, head_dim } => kernels::rope(n_heads, head_dim),
-            Op::Attention { n_heads, head_dim, n_kv_heads, max_len } => {
-                kernels::attention(n_heads, head_dim, n_kv_heads, max_len)
+            Op::Rope { n_heads, head_dim, n } => kernels::rope(n_heads, head_dim, n),
+            Op::Attention { n_heads, head_dim, n_kv_heads, max_len, n } => {
+                kernels::attention(n_heads, head_dim, n_kv_heads, max_len, n)
             }
             Op::SiluMul(n) => kernels::silu_mul(n),
         }
@@ -113,8 +113,10 @@ impl fmt::Display for Op {
             Op::Matmul { rows, cols, n } => write!(f, "matmul {rows}×{cols}{}", tokens(*n)),
             Op::Add(n) => write!(f, "add {n}"),
             Op::Rmsnorm { rows, dim, .. } => write!(f, "rmsnorm {rows}×{dim}"),
-            Op::Rope { n_heads, head_dim } => write!(f, "rope {n_heads}×{head_dim}"),
-            Op::Attention { n_heads, head_dim, .. } => write!(f, "attention {n_heads}×{head_dim}"),
+            Op::Rope { n_heads, head_dim, n } => write!(f, "rope {n_heads}×{head_dim}{}", tokens(*n)),
+            Op::Attention { n_heads, head_dim, n, .. } => {
+                write!(f, "attention {n_heads}×{head_dim}{}", tokens(*n))
+            }
             Op::SiluMul(n) => write!(f, "silu_mul {n}"),
         }
     }
@@ -287,6 +289,7 @@ impl Device for Titania {
         let op = Op::Rope {
             n_heads: x.len / head_dim,
             head_dim,
+            n: 1,
         };
         self.run(op, &[x.addr, table, pos as u32]);
     }
@@ -306,8 +309,9 @@ impl Device for Titania {
             head_dim,
             n_kv_heads,
             max_len: k_cache.len / (n_kv_heads * head_dim),
+            n: 1,
         };
-        let params = [out.addr, q.addr, k_cache.addr, v_cache.addr, len as u32];
+        let params = [out.addr, q.addr, k_cache.addr, v_cache.addr, (len - 1) as u32];
         self.run(op, &params);
     }
 
@@ -431,25 +435,56 @@ mod tests {
 
     #[test]
     fn rope() {
-        let gpu = Titania::new();
-        let (mut cpu_x, mut x) = buffers(&gpu, 4 * 128, 11);
-        Cpu.rope(&mut cpu_x, 37, 128, 1_000_000.0);
-        gpu.rope(&mut x, 37, 128, 1_000_000.0);
-        assert_close(&gpu, &x, &cpu_x);
+        let (n_heads, head_dim, theta) = (4, 128, 1_000_000.0);
+        for (pos, n) in [(37, 1), (37, 3)] {
+            let gpu = Titania::new();
+            let (mut cpu_x, mut x) = buffers(&gpu, n * n_heads * head_dim, 11);
+            // The CPU rotates one token at a time.
+            for (t, token) in cpu_x.chunks_exact_mut(n_heads * head_dim).enumerate() {
+                let mut rotated = token.to_vec();
+                Cpu.rope(&mut rotated, pos + t, head_dim, theta);
+                token.copy_from_slice(&rotated);
+            }
+            // The device runs the kernel for one token; only the kernel
+            // takes a batch so far.
+            match n {
+                1 => gpu.rope(&mut x, pos, head_dim, theta),
+                _ => {
+                    let table = gpu.rope_table(head_dim, theta, pos + n - 1);
+                    gpu.run(Op::Rope { n_heads, head_dim, n }, &[x.addr, table, pos as u32]);
+                }
+            }
+            assert_close(&gpu, &x, &cpu_x);
+        }
     }
 
     #[test]
     fn attention() {
         let (n_heads, head_dim, n_kv_heads, max_len) = (4, 64, 2, 40);
-        for len in [1, 7, 33, 40] {
+        for (pos, n) in [(0, 1), (6, 1), (32, 1), (39, 1), (0, 5), (30, 10)] {
             let gpu = Titania::new();
             let kv_len = max_len * n_kv_heads * head_dim;
-            let (cpu_q, q) = buffers(&gpu, n_heads * head_dim, 12);
+            let width = n_heads * head_dim;
+            let (cpu_q, q) = buffers(&gpu, n * width, 12);
             let (cpu_k, k) = buffers(&gpu, kv_len, 13);
             let (cpu_v, v) = buffers(&gpu, kv_len, 14);
-            let (mut cpu_out, mut out) = buffers(&gpu, n_heads * head_dim, 15);
-            Cpu.attention(&mut cpu_out, &cpu_q, &cpu_k, &cpu_v, len, head_dim, n_kv_heads);
-            gpu.attention(&mut out, &q, &k, &v, len, head_dim, n_kv_heads);
+            let (mut cpu_out, mut out) = buffers(&gpu, n * width, 15);
+            // The CPU attends for one token at a time, each up to and
+            // including its own position.
+            for (t, (out, q)) in cpu_out.chunks_exact_mut(width).zip(cpu_q.chunks_exact(width)).enumerate() {
+                let mut result = vec![0.0; width];
+                Cpu.attention(&mut result, &q.to_vec(), &cpu_k, &cpu_v, pos + t + 1, head_dim, n_kv_heads);
+                out.copy_from_slice(&result);
+            }
+            // The device runs the kernel for one token; only the kernel
+            // takes a batch so far.
+            match n {
+                1 => gpu.attention(&mut out, &q, &k, &v, pos + 1, head_dim, n_kv_heads),
+                _ => {
+                    let op = Op::Attention { n_heads, head_dim, n_kv_heads, max_len, n };
+                    gpu.run(op, &[out.addr, q.addr, k.addr, v.addr, pos as u32]);
+                }
+            }
             assert_close(&gpu, &out, &cpu_out);
         }
     }

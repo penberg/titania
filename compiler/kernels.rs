@@ -280,25 +280,30 @@ pub fn rmsnorm(rows: usize, dim: usize, eps: f32) -> Kernel {
     kernel(b, [rows.div_ceil(WARPS), 1], WARPS * 32, 0)
 }
 
-/// Rotates each of `n_heads` heads of `x`, each `head_dim` elements long, to
-/// encode position `pos`. Element `i` of a head pairs with element
-/// `i + head_dim / 2`, rotated by the angle in a table of cosines and sines:
-/// `table[pos][i] = (cos, sin)`.
+/// Rotates each of `n_heads` heads of `x`, each `head_dim` elements long, for
+/// each of `n` tokens, to encode the token's position: `pos` for the first
+/// token, `pos + 1` for the next, and so on. Element `i` of a head pairs with
+/// element `i + head_dim / 2`, rotated by the angle in a table of cosines and
+/// sines: `table[pos][i] = (cos, sin)`.
 ///
-/// Each block rotates one head, with one thread per pair.
+/// The grid is one block per head wide and one per token high, with one
+/// thread per pair.
 ///
 /// Parameters: `x`, `table`, `pos`.
-pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
+pub fn rope(n_heads: usize, head_dim: usize, n: usize) -> Kernel {
     let half = head_dim / 2;
     let mut b = Builder::new();
-    let (head, i) = (b.ctaid_x(), b.tid());
+    let (head, token, i) = (b.ctaid_x(), b.ctaid_y(), b.tid());
     let (x, table, pos) = (b.param(0), b.param(1), b.param(2));
+    let heads = b.mov(n_heads as u32);
+    let index = b.imad(token, heads, head);
     let head_bytes = b.mov((head_dim * 4) as u32);
-    let x_head = b.imad(head, head_bytes, x);
+    let x_head = b.imad(index, head_bytes, x);
     let offset = b.shl(i, 2);
     let x_addr = b.iadd(x_head, offset);
     let a = b.ldg(x_addr, 0);
     let c = b.ldg(x_addr, (half * 4) as u32);
+    let pos = b.iadd(pos, token);
     let row = b.mov(half as u32);
     let entry = b.imad(pos, row, i);
     let entry_offset = b.shl(entry, 3);
@@ -313,14 +318,17 @@ pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
     let second = b.fadd(c_cos, a_sin);
     b.stg(x_addr, 0, first);
     b.stg(x_addr, (half * 4) as u32, second);
-    kernel(b, [n_heads, 1], half, 0)
+    kernel(b, [n_heads, n], half, 0)
 }
 
-/// Causal self-attention: each of `n_heads` query heads in `q` attends over
-/// the first `len` positions of the key and value caches, which hold
-/// `n_kv_heads` heads per position and room for `max_len` positions.
+/// Causal self-attention for `n` tokens in `q`, the first at position `pos`:
+/// each of a token's `n_heads` query heads attends over the key and value
+/// caches up to and including the token's own position. The caches hold
+/// `n_kv_heads` heads per position and room for `max_len` positions, and must
+/// already hold the tokens' own keys and values.
 ///
-/// Each block handles one head, with one thread per element of the head:
+/// The grid is one block per head wide and one per token high, with one
+/// thread per element of the head:
 ///
 /// 1. Each warp scores a share of the positions: the dot product of the
 ///    query with the position's key.
@@ -331,8 +339,8 @@ pub fn rope(n_heads: usize, head_dim: usize) -> Kernel {
 ///
 /// Shared memory holds one partial result per warp, then the scores.
 ///
-/// Parameters: `out`, `q`, `k_cache`, `v_cache`, `len`.
-pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize) -> Kernel {
+/// Parameters: `out`, `q`, `k_cache`, `v_cache`, `pos`.
+pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize, n: usize) -> Kernel {
     assert!(head_dim.is_multiple_of(32) && head_dim <= 1024, "unsupported head size {head_dim}");
     let group = n_heads / n_kv_heads;
     assert!(group.is_power_of_two(), "query heads per key/value head must be a power of two");
@@ -345,16 +353,23 @@ pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: us
     let scale = 1.0 / (head_dim as f32).sqrt();
 
     let mut b = Builder::new();
-    let (head, tid) = (b.ctaid_x(), b.tid());
+    let (head, token, tid) = (b.ctaid_x(), b.ctaid_y(), b.tid());
     let lane = b.and(tid, 31);
     let warp = b.shr(tid, 5);
     let first = b.isetp(Cond::Eq, lane, 0);
     let tid_offset = b.shl(tid, 2);
     let warp_offset = b.shl(warp, 2);
-    let (out, q, k, v, len) = (b.param(0), b.param(1), b.param(2), b.param(3), b.param(4));
+    let (out, q, k, v, pos) = (b.param(0), b.param(1), b.param(2), b.param(3), b.param(4));
+    // Positions the token attends over: up to and including its own.
+    let own = b.iadd(pos, token);
+    let len = b.iadd(own, 1);
     let kv_head = b.shr(head, group.trailing_zeros());
     let kv_offset = b.imul(kv_head, head_bytes);
-    let head_offset = b.imul(head, head_bytes);
+    // The token's head in `q` and `out`, which hold every head of a token
+    // together.
+    let heads = b.mov(n_heads as u32);
+    let index = b.imad(token, heads, head);
+    let head_offset = b.imul(index, head_bytes);
 
     // 1. Scores. Each lane holds every 32nd element of the query.
     let lane_offset = b.shl(lane, 2);
@@ -445,5 +460,5 @@ pub fn attention(n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: us
     let out_head = b.iadd(out, head_offset);
     let out_addr = b.iadd(out_head, tid_offset);
     b.stg(out_addr, 0, result);
-    kernel(b, [n_heads, 1], head_dim, shared)
+    kernel(b, [n_heads, n], head_dim, shared)
 }
