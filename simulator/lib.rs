@@ -172,7 +172,6 @@ fn decode(word: u64) -> Option<Inst> {
 }
 
 /// A simulated Titania GPU with its global memory.
-#[derive(Default)]
 pub struct Simulator {
     /// Global memory, one word per element: every access is a whole,
     /// aligned word. Atomics let blocks run in parallel; relaxed ordering is
@@ -180,6 +179,8 @@ pub struct Simulator {
     /// writes it (§3).
     memory: Vec<AtomicU32>,
     activity: Arc<Activity>,
+    /// Whether the host has the vector extensions [`map_simd`] uses.
+    simd: bool,
 }
 
 /// What a simulator is doing, updated as it runs so that another thread can
@@ -272,9 +273,19 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Default for Simulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Simulator {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            memory: Vec::new(),
+            activity: Arc::default(),
+            simd: host_has_simd(),
+        }
     }
 
     /// What the simulator is doing, to watch it from another thread.
@@ -338,7 +349,8 @@ impl Simulator {
                 id,
                 x: id % width,
                 y: id / width,
-                shared: vec![0; launch.shared as usize / 4],
+                shared: (0..launch.shared / 4).map(|_| AtomicU32::new(0)).collect(),
+                simd: self.simd,
             }
             .run()
         })
@@ -355,7 +367,11 @@ struct Block<'a> {
     id: u32,
     x: u32,
     y: u32,
-    shared: Vec<u32>,
+    /// Shared memory. Only one warp runs at a time, so relaxed atomics
+    /// cost nothing over plain words and let it share global memory's code.
+    shared: Vec<AtomicU32>,
+    /// Whether to run whole rows of lanes through [`map_simd`].
+    simd: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -372,17 +388,25 @@ struct Warp {
     /// Threads that exist and have not exited, one bit per lane.
     live: u32,
     /// Register `r` of lane `l` is `regs[r][l]`.
-    regs: Vec<[u32; WARP_SIZE as usize]>,
+    regs: Box<[Row; NUM_REGS]>,
     /// Predicate registers, one bit per lane; the last is `pt`.
     preds: [u32; 8],
     state: State,
 }
 
-/// A source operand.
+/// A source operand: a register, or a row every lane reads, for an
+/// immediate.
 #[derive(Clone, Copy)]
-enum Src {
+enum Src<'a> {
     Reg(u8),
-    Imm(u32),
+    Imm(&'a Row),
+}
+
+/// The index of register `reg` in a warp's register file. Register fields
+/// are 6 bits wide, so every value fits; the mask lets the compiler drop the
+/// bounds check.
+fn reg(reg: u8) -> usize {
+    reg as usize & (NUM_REGS - 1)
 }
 
 impl Warp {
@@ -392,26 +416,143 @@ impl Warp {
             id,
             pc: 0,
             live: if threads == WARP_SIZE { !0 } else { (1 << threads) - 1 },
-            regs: vec![[0; WARP_SIZE as usize]; NUM_REGS],
+            regs: Box::new([[0; WARP_SIZE as usize]; NUM_REGS]),
             preds: [0, 0, 0, 0, 0, 0, 0, !0],
             state: State::Running,
         }
     }
 
     fn get(&self, src: Src, lane: usize) -> u32 {
+        self.row(src)[lane]
+    }
+
+    /// Reads a source operand in every lane.
+    fn row<'s>(&'s self, src: Src<'s>) -> &'s Row {
         match src {
-            Src::Reg(reg) => self.regs[reg as usize][lane],
-            Src::Imm(imm) => imm,
+            Src::Reg(r) => &self.regs[reg(r)],
+            Src::Imm(row) => row,
         }
     }
 
     /// Writes `value` to register `rd` of `lane`, discarding writes to `r0`.
     fn set(&mut self, rd: u8, lane: usize, value: u32) {
         if rd != 0 {
-            self.regs[rd as usize][lane] = value;
+            self.regs[reg(rd)][lane] = value;
+        }
+    }
+
+    /// Writes `values` to register `rd` in the lanes of `mask`, discarding
+    /// writes to `r0`.
+    fn set_lanes(&mut self, rd: u8, mask: u32, values: &Row) {
+        if rd == 0 {
+            return;
+        }
+        let dst = &mut self.regs[reg(rd)];
+        if mask == FULL {
+            *dst = *values;
+        } else {
+            for lane in lanes(mask) {
+                dst[lane] = values[lane];
+            }
         }
     }
 }
+
+/// Reads the word at `addrs[lane] + imm` of `space` for each `lane`, or
+/// returns the first address that isn't a word in `space`.
+fn gather<T>(
+    space: &[T],
+    addrs: &Row,
+    imm: u32,
+    lanes: impl Iterator<Item = usize>,
+    read: impl Fn(&T) -> u32,
+) -> Result<Row, u32> {
+    let mut out = [0; WARP_SIZE as usize];
+    for lane in lanes {
+        let addr = addrs[lane].wrapping_add(imm);
+        out[lane] = read(word(space, addr).ok_or(addr)?);
+    }
+    Ok(out)
+}
+
+/// Writes `values[lane]` to the word at `addrs[lane] + imm` of `space` for
+/// each `lane`, or returns the first address that isn't a word in `space`.
+fn scatter<T>(
+    space: &[T],
+    addrs: &Row,
+    values: &Row,
+    imm: u32,
+    lanes: impl Iterator<Item = usize>,
+    write: impl Fn(&T, u32),
+) -> Result<(), u32> {
+    for lane in lanes {
+        let addr = addrs[lane].wrapping_add(imm);
+        write(word(space, addr).ok_or(addr)?, values[lane]);
+    }
+    Ok(())
+}
+
+/// A two-operand integer operation as the ALU takes it. Generic, rather than
+/// taking a function pointer, so that the operation inlines into the loop
+/// over the lanes.
+#[inline(always)]
+fn int(f: impl Fn(u32, u32) -> u32) -> impl Fn(u32, u32, u32) -> u32 {
+    move |x, y, _| f(x, y)
+}
+
+/// A two-operand floating-point operation as the ALU takes it.
+#[inline(always)]
+fn float(f: impl Fn(f32, f32) -> f32) -> impl Fn(u32, u32, u32) -> u32 {
+    move |x, y, _| canonical(f(f32::from_bits(x), f32::from_bits(y)))
+}
+
+/// A register's value in every lane of a warp.
+type Row = [u32; WARP_SIZE as usize];
+
+/// `out[l] = f(a[l], b[l], c[l])` for every lane. The loop has a fixed trip
+/// count and no branches of its own, so the compiler vectorizes it for
+/// whatever `f` allows.
+#[inline(always)]
+fn map(a: &Row, b: &Row, c: &Row, f: impl Fn(u32, u32, u32) -> u32) -> Row {
+    let mut out = [0; WARP_SIZE as usize];
+    for lane in 0..WARP_SIZE as usize {
+        out[lane] = f(a[lane], b[lane], c[lane]);
+    }
+    out
+}
+
+/// [`map`], compiled for the vector extensions the host was found to have at
+/// run time (`Simulator::new` checks), so that it uses them even when the
+/// build targets a baseline CPU: in particular, fused multiply-add stays a
+/// vector instruction rather than a call into the math library.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn map_simd(a: &Row, b: &Row, c: &Row, f: impl Fn(u32, u32, u32) -> u32) -> Row {
+    map(a, b, c, f)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn map_simd(a: &Row, b: &Row, c: &Row, f: impl Fn(u32, u32, u32) -> u32) -> Row {
+    map(a, b, c, f)
+}
+
+/// Whether the host has the vector extensions [`map_simd`] is compiled for.
+fn host_has_simd() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// The mask with every lane of a warp set.
+const FULL: u32 = u32::MAX;
+
+/// Zero in every lane: what an instruction's unused operands read.
+static ZERO: Row = [0; WARP_SIZE as usize];
 
 /// The lanes whose bits are set in `mask`.
 fn lanes(mut mask: u32) -> impl Iterator<Item = usize> {
@@ -468,16 +609,14 @@ impl Block<'_> {
         w.pc += 1;
 
         let imm = inst.imm.unwrap_or(0);
-        let last = |reg: u8| inst.imm.map_or(Src::Reg(reg), Src::Imm);
+        let imm_row = [imm; WARP_SIZE as usize];
+        let zero = Src::Imm(&ZERO);
+        let last = |reg: u8| if inst.imm.is_some() { Src::Imm(&imm_row) } else { Src::Reg(reg) };
         let (a, b, c) = match inst.format {
-            Format::R1 => (last(inst.ra), Src::Imm(0), Src::Imm(0)),
-            Format::R2 | Format::Setp => (Src::Reg(inst.ra), last(inst.rb), Src::Imm(0)),
+            Format::R1 => (last(inst.ra), zero, zero),
+            Format::R2 | Format::Setp => (Src::Reg(inst.ra), last(inst.rb), zero),
             Format::R3 => (Src::Reg(inst.ra), Src::Reg(inst.rb), last(inst.rc)),
-            _ => (Src::Reg(inst.ra), Src::Reg(inst.rb), Src::Imm(0)),
-        };
-        let int = |f: fn(u32, u32) -> u32| move |x: u32, y: u32, _: u32| f(x, y);
-        let float = |f: fn(f32, f32) -> f32| {
-            move |x: u32, y: u32, _: u32| canonical(f(f32::from_bits(x), f32::from_bits(y)))
+            _ => (Src::Reg(inst.ra), Src::Reg(inst.rb), zero),
         };
 
         match inst.op {
@@ -534,29 +673,49 @@ impl Block<'_> {
             FSETP_GT => self.setp(w, &inst, mask, a, b, |x, y| f32::from_bits(x) > f32::from_bits(y)),
             FSETP_GE => self.setp(w, &inst, mask, a, b, |x, y| f32::from_bits(x) >= f32::from_bits(y)),
             LDG | LDS | LDP => {
-                for lane in lanes(mask) {
-                    let addr = w.regs[inst.ra as usize][lane].wrapping_add(imm);
-                    let value = match inst.op {
-                        LDG => self.global(pc, addr)?.load(Relaxed),
-                        LDS => *self.shared(pc, addr)?,
-                        _ => *word(self.launch.params, addr).ok_or(Error::Memory { pc, space: "param", addr })?,
-                    };
-                    w.set(inst.rd, lane, value);
-                }
+                let addrs = &w.regs[reg(inst.ra)];
+                let load = |cell: &AtomicU32| cell.load(Relaxed);
+                // Whole warps take a loop with a fixed trip count.
+                let (space, values) = if mask == FULL {
+                    let all = 0..WARP_SIZE as usize;
+                    match inst.op {
+                        LDG => ("global", gather(self.memory, addrs, imm, all, load)),
+                        LDS => ("shared", gather(&self.shared, addrs, imm, all, load)),
+                        _ => ("param", gather(self.launch.params, addrs, imm, all, |x| *x)),
+                    }
+                } else {
+                    let some = lanes(mask);
+                    match inst.op {
+                        LDG => ("global", gather(self.memory, addrs, imm, some, load)),
+                        LDS => ("shared", gather(&self.shared, addrs, imm, some, load)),
+                        _ => ("param", gather(self.launch.params, addrs, imm, some, |x| *x)),
+                    }
+                };
+                let values = values.map_err(|addr| Error::Memory { pc, space, addr })?;
+                w.set_lanes(inst.rd, mask, &values);
             }
             STG | STS => {
-                for lane in lanes(mask) {
-                    let addr = w.regs[inst.ra as usize][lane].wrapping_add(imm);
-                    let value = w.regs[inst.rb as usize][lane];
+                let addrs = &w.regs[reg(inst.ra)];
+                let values = &w.regs[reg(inst.rb)];
+                let store = |cell: &AtomicU32, value| cell.store(value, Relaxed);
+                let (space, result) = if mask == FULL {
+                    let all = 0..WARP_SIZE as usize;
                     match inst.op {
-                        STG => self.global(pc, addr)?.store(value, Relaxed),
-                        _ => *self.shared(pc, addr)? = value,
+                        STG => ("global", scatter(self.memory, addrs, values, imm, all, store)),
+                        _ => ("shared", scatter(&self.shared, addrs, values, imm, all, store)),
                     }
-                }
+                } else {
+                    let some = lanes(mask);
+                    match inst.op {
+                        STG => ("global", scatter(self.memory, addrs, values, imm, some, store)),
+                        _ => ("shared", scatter(&self.shared, addrs, values, imm, some, store)),
+                    }
+                };
+                result.map_err(|addr| Error::Memory { pc, space, addr })?;
             }
             SHFL_IDX | SHFL_BFLY => {
                 // Every lane reads its source before any lane writes.
-                let src = w.regs[inst.ra as usize];
+                let src = w.regs[reg(inst.ra)];
                 for lane in lanes(mask) {
                     let offset = w.get(b, lane) & 31;
                     let from = match inst.op {
@@ -604,6 +763,20 @@ impl Block<'_> {
         c: Src,
         f: impl Fn(u32, u32, u32) -> u32,
     ) {
+        if mask == FULL {
+            // Every lane is active: compute the whole row at once, which the
+            // host can do with its own vector instructions.
+            let (a, b, c) = (w.row(a), w.row(b), w.row(c));
+            let out = if self.simd {
+                // SAFETY: `simd` is set only when the host has every
+                // extension `map_simd` is compiled for.
+                unsafe { map_simd(a, b, c, f) }
+            } else {
+                map(a, b, c, f)
+            };
+            w.set_lanes(inst.rd, FULL, &out);
+            return;
+        }
         for lane in lanes(mask) {
             let value = f(w.get(a, lane), w.get(b, lane), w.get(c, lane));
             w.set(inst.rd, lane, value);
@@ -613,8 +786,15 @@ impl Block<'_> {
     /// Executes a comparison: `pd = f(a, b)` in every lane.
     fn setp(&self, w: &mut Warp, inst: &Inst, mask: u32, a: Src, b: Src, f: impl Fn(u32, u32) -> bool) {
         let mut bits = 0;
-        for lane in lanes(mask) {
-            bits |= (f(w.get(a, lane), w.get(b, lane)) as u32) << lane;
+        if mask == FULL {
+            let (a, b) = (w.row(a), w.row(b));
+            for lane in 0..WARP_SIZE as usize {
+                bits |= (f(a[lane], b[lane]) as u32) << lane;
+            }
+        } else {
+            for lane in lanes(mask) {
+                bits |= (f(w.get(a, lane), w.get(b, lane)) as u32) << lane;
+            }
         }
         if inst.rd != PT {
             let pred = &mut w.preds[inst.rd as usize];
@@ -622,17 +802,6 @@ impl Block<'_> {
         }
     }
 
-    fn global(&self, pc: usize, addr: u32) -> Result<&AtomicU32, Error> {
-        word(self.memory, addr).ok_or(Error::Memory { pc, space: "global", addr })
-    }
-
-    fn shared(&mut self, pc: usize, addr: u32) -> Result<&mut u32, Error> {
-        let index = addr as usize / 4;
-        if !addr.is_multiple_of(4) || index >= self.shared.len() {
-            return Err(Error::Memory { pc, space: "shared", addr });
-        }
-        Ok(&mut self.shared[index])
-    }
 }
 
 /// The word at byte address `addr` of a memory space, if it's aligned and in
