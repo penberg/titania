@@ -45,9 +45,11 @@ single person can read, understand, and implement all of it.
 
 ## Quick start
 
-Install the `titania` command:
+Clone the repository and install the `titania` command:
 
 ```console
+git clone https://github.com/penberg/titania.git
+cd titania
 cargo install --path cli
 ```
 
