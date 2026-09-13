@@ -734,11 +734,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "titania-rtlsim"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "titania-simulator",
+]
+
+[[package]]
 name = "titania-runtime"
 version = "0.1.0"
 dependencies = [
  "titania-compiler",
  "titania-model",
+ "titania-rtlsim",
  "titania-simulator",
 ]
 

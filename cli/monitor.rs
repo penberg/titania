@@ -15,22 +15,27 @@ const LISTING: usize = 7;
 const RATE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A panel showing what the simulated GPU is running: the kernel, where one
-/// of its warps is, and how fast instructions are executing.
+/// of its warps is, and how fast instructions are executing, with the clock
+/// rate when the simulator has a clock.
 pub struct Panel {
     monitor: Arc<Monitor>,
-    /// When the instruction count was last measured, and what it was.
-    measured: (Instant, u64),
-    /// Instructions per second since the measurement before.
+    /// When the instruction and cycle counts were last measured, and what
+    /// they were.
+    measured: (Instant, u64, u64),
+    /// Instructions and cycles per second since the measurement before.
     rate: f64,
+    clock: f64,
 }
 
 impl Panel {
     pub fn new(monitor: Arc<Monitor>) -> Self {
-        let instructions = monitor.activity().instructions();
+        let activity = monitor.activity();
+        let (instructions, cycles) = (activity.instructions(), activity.cycles());
         Self {
             monitor,
-            measured: (Instant::now(), instructions),
+            measured: (Instant::now(), instructions, cycles),
             rate: 0.0,
+            clock: 0.0,
         }
     }
 
@@ -39,10 +44,12 @@ impl Panel {
     pub fn draw(&mut self, columns: usize, rows: usize) -> Vec<Line> {
         let activity = self.monitor.activity();
         let instructions = activity.instructions();
-        let (at, before) = self.measured;
+        let cycles = activity.cycles();
+        let (at, before, cycles_before) = self.measured;
         if at.elapsed() >= RATE_INTERVAL {
             self.rate = (instructions - before) as f64 / at.elapsed().as_secs_f64();
-            self.measured = (Instant::now(), instructions);
+            self.clock = (cycles - cycles_before) as f64 / at.elapsed().as_secs_f64();
+            self.measured = (Instant::now(), instructions, cycles);
         }
 
         let Some(kernel) = self.monitor.kernel() else {
@@ -73,12 +80,15 @@ impl Panel {
             columns,
         ));
         let position = format!("block {} · warp {}", sample.block, sample.warp);
-        let stats = format!(
+        let mut stats = format!(
             "{} launches · {} instructions · {}/s",
             count(activity.launches() as f64),
             count(instructions as f64),
             count(self.rate),
         );
+        if cycles > 0 {
+            stats.push_str(&format!(" · {} cycles · {}", count(cycles as f64), frequency(self.clock)));
+        }
         let inner = columns.saturating_sub(4);
         lines.push(tui::boxed(tui::spread(vec![span(position)], vec![span(stats).dark_grey()], inner), columns));
 
@@ -118,6 +128,17 @@ fn count(n: f64) -> String {
         unit += 1;
     }
     format!("{value:.1}{}", UNITS[unit])
+}
+
+/// A clock rate, for humans: 950 Hz, 285 kHz, 1.2 MHz.
+fn frequency(hz: f64) -> String {
+    if hz >= 1e6 {
+        format!("{:.1} MHz", hz / 1e6)
+    } else if hz >= 1e3 {
+        format!("{:.0} kHz", hz / 1e3)
+    } else {
+        format!("{hz:.0} Hz")
+    }
 }
 
 /// A size in bytes, for humans.

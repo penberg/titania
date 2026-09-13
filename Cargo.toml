@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "compiler", "model", "runtime", "simulator"]
+members = ["cli", "compiler", "model", "rtlsim", "runtime", "simulator"]
 resolver = "3"
 
 # The forward pass is unusably slow unoptimized, on the CPU and in the
@@ -8,4 +8,7 @@ resolver = "3"
 opt-level = 3
 
 [profile.dev.package.titania-simulator]
+opt-level = 3
+
+[profile.dev.package.titania-rtlsim]
 opt-level = 3

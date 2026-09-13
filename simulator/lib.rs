@@ -193,6 +193,8 @@ pub struct Simulator {
 pub struct Activity {
     launches: AtomicU64,
     instructions: AtomicU64,
+    /// Clock cycles, for simulators that have them.
+    cycles: AtomicU64,
     /// A [`Sample`], packed into one word so that it is read whole.
     sample: AtomicU64,
 }
@@ -217,6 +219,12 @@ impl Activity {
         self.instructions.load(Relaxed)
     }
 
+    /// Clock cycles simulated so far, or zero for a simulator that does not
+    /// model time.
+    pub fn cycles(&self) -> u64 {
+        self.cycles.load(Relaxed)
+    }
+
     /// Where a warp of the kernel launched last was recently.
     pub fn sample(&self) -> Sample {
         let packed = self.sample.load(Relaxed);
@@ -227,7 +235,24 @@ impl Activity {
         }
     }
 
-    fn record(&self, sample: Sample) {
+    /// Records that a kernel was launched.
+    pub fn launched(&self) {
+        self.launches.fetch_add(1, Relaxed);
+        self.record(Sample { block: 0, warp: 0, pc: 0 });
+    }
+
+    /// Records that `instructions` more instructions have executed.
+    pub fn executed(&self, instructions: u64) {
+        self.instructions.fetch_add(instructions, Relaxed);
+    }
+
+    /// Records that `cycles` more clock cycles have passed.
+    pub fn clocked(&self, cycles: u64) {
+        self.cycles.fetch_add(cycles, Relaxed);
+    }
+
+    /// Records where a warp is.
+    pub fn record(&self, sample: Sample) {
         let packed = (sample.block as u64) << 32 | (sample.warp as u64) << 24 | (sample.pc as u64 & 0xff_ffff);
         self.sample.store(packed, Relaxed);
     }
@@ -338,8 +363,7 @@ impl Simulator {
             .map(|(pc, &word)| decode(word).ok_or(Error::InvalidInstruction { pc, word }))
             .collect::<Result<Vec<_>, _>>()?;
 
-        self.activity.launches.fetch_add(1, Relaxed);
-        self.activity.record(Sample { block: 0, warp: 0, pc: 0 });
+        self.activity.launched();
         (0..width * height).into_par_iter().try_for_each(|id| {
             Block {
                 memory: &self.memory,
@@ -589,7 +613,7 @@ impl Block<'_> {
                 }
             }
             if warps.iter().all(|warp| warp.state == State::Finished) {
-                self.activity.instructions.fetch_add(executed, Relaxed);
+                self.activity.executed(executed);
                 return Ok(());
             }
             for warp in &mut warps {

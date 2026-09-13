@@ -1,8 +1,10 @@
-//! Runs the model on a Titania GPU, here simulated by the ISA simulator.
+//! Runs the model on a Titania GPU: the ISA simulator, or the RTL simulator
+//! of the Titania GPU design.
 //!
 //! [`Titania`] implements the model's [`Device`] operations by compiling each
 //! one, the first time it is used with a given shape, into a Titania kernel,
-//! and launching it. A [`Monitor`] watches it do so from another thread.
+//! and launching it on a [`Gpu`]. A [`Monitor`] watches it do so from another
+//! thread.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,11 +15,100 @@ use std::sync::{Arc, Mutex};
 use titania_compiler::kernels::TILE;
 use titania_compiler::{Kernel, kernels};
 use titania_model::{Device, Tensor};
-use titania_simulator::{Activity, Launch, Simulator};
+pub use titania_rtlsim::Rtlsim;
+pub use titania_simulator::Simulator;
+use titania_simulator::{Activity, Error, Launch};
 
-/// A Titania GPU, simulated.
-pub struct Titania {
-    sim: RefCell<Simulator>,
+/// A GPU that runs Titania programs: what the host sees of it (§5 of the
+/// architecture manual).
+pub trait Gpu {
+    /// What the GPU is doing, to watch it from another thread.
+    fn activity(&self) -> Arc<Activity>;
+
+    /// Allocates `bytes` of zeroed global memory, returning its address.
+    fn alloc(&mut self, bytes: usize) -> u32;
+
+    /// Writes words to global memory at `addr`.
+    fn write(&mut self, addr: u32, words: &[u32]);
+
+    /// Reads `len` words from global memory at `addr`.
+    fn read(&self, addr: u32, len: usize) -> Vec<u32>;
+
+    /// Runs a kernel to completion.
+    fn launch(&mut self, launch: &Launch) -> Result<(), Error>;
+}
+
+/// The ISA simulator: the reference the hardware is checked against.
+impl Gpu for Simulator {
+    fn activity(&self) -> Arc<Activity> {
+        Simulator::activity(self)
+    }
+
+    fn alloc(&mut self, bytes: usize) -> u32 {
+        Simulator::alloc(self, bytes)
+    }
+
+    fn write(&mut self, addr: u32, words: &[u32]) {
+        Simulator::write(self, addr, words)
+    }
+
+    fn read(&self, addr: u32, len: usize) -> Vec<u32> {
+        Simulator::read(self, addr, len)
+    }
+
+    fn launch(&mut self, launch: &Launch) -> Result<(), Error> {
+        Simulator::launch(self, launch)
+    }
+}
+
+/// The RTL simulator: the Titania GPU design, simulated cycle by cycle.
+impl Gpu for Rtlsim {
+    fn activity(&self) -> Arc<Activity> {
+        Rtlsim::activity(self)
+    }
+
+    fn alloc(&mut self, bytes: usize) -> u32 {
+        Rtlsim::alloc(self, bytes)
+    }
+
+    fn write(&mut self, addr: u32, words: &[u32]) {
+        Rtlsim::write(self, addr, words)
+    }
+
+    fn read(&self, addr: u32, len: usize) -> Vec<u32> {
+        Rtlsim::read(self, addr, len)
+    }
+
+    fn launch(&mut self, launch: &Launch) -> Result<(), Error> {
+        Rtlsim::launch(self, launch).map(|_| ())
+    }
+}
+
+impl Gpu for Box<dyn Gpu> {
+    fn activity(&self) -> Arc<Activity> {
+        (**self).activity()
+    }
+
+    fn alloc(&mut self, bytes: usize) -> u32 {
+        (**self).alloc(bytes)
+    }
+
+    fn write(&mut self, addr: u32, words: &[u32]) {
+        (**self).write(addr, words)
+    }
+
+    fn read(&self, addr: u32, len: usize) -> Vec<u32> {
+        (**self).read(addr, len)
+    }
+
+    fn launch(&mut self, launch: &Launch) -> Result<(), Error> {
+        (**self).launch(launch)
+    }
+}
+
+/// A Titania GPU running the model.
+pub struct Titania<G: Gpu = Simulator> {
+    gpu: RefCell<G>,
     /// Compiled kernels, by operation and shape.
     kernels: RefCell<HashMap<Op, Rc<Compiled>>>,
     monitor: Arc<Monitor>,
@@ -140,15 +231,14 @@ pub struct Weight {
     shape: Vec<usize>,
 }
 
-impl Titania {
-    pub fn new() -> Self {
-        let sim = Simulator::new();
+impl<G: Gpu> Titania<G> {
+    pub fn new(gpu: G) -> Self {
         let monitor = Arc::new(Monitor {
             kernel: Mutex::new(None),
-            activity: sim.activity(),
+            activity: gpu.activity(),
         });
         Self {
-            sim: RefCell::new(sim),
+            gpu: RefCell::new(gpu),
             kernels: RefCell::default(),
             monitor,
         }
@@ -176,26 +266,26 @@ impl Titania {
             shared: kernel.shared,
             params,
         };
-        if let Err(e) = self.sim.borrow().launch(&launch) {
+        if let Err(e) = self.gpu.borrow_mut().launch(&launch) {
             panic!("{op:?} failed: {e}\n{}", kernel.disassemble());
         }
     }
 
     fn upload_words(&self, words: &[u32]) -> u32 {
-        let mut sim = self.sim.borrow_mut();
-        let addr = sim.alloc(words.len() * 4);
-        sim.write(addr, words);
+        let mut gpu = self.gpu.borrow_mut();
+        let addr = gpu.alloc(words.len() * 4);
+        gpu.write(addr, words);
         addr
     }
 }
 
-impl Default for Titania {
+impl Default for Titania<Simulator> {
     fn default() -> Self {
-        Self::new()
+        Self::new(Simulator::new())
     }
 }
 
-impl Device for Titania {
+impl<G: Gpu> Device for Titania<G> {
     type Buffer = Buffer;
     type Weight = Weight;
 
@@ -214,7 +304,7 @@ impl Device for Titania {
 
     fn alloc(&self, len: usize) -> Buffer {
         Buffer {
-            addr: self.sim.borrow_mut().alloc(len * 4),
+            addr: self.gpu.borrow_mut().alloc(len * 4),
             len,
             capacity: len,
         }
@@ -226,13 +316,13 @@ impl Device for Titania {
     }
 
     fn read(&self, buf: &Buffer) -> Vec<f32> {
-        self.sim.borrow().read(buf.addr, buf.len).into_iter().map(f32::from_bits).collect()
+        self.gpu.borrow().read(buf.addr, buf.len).into_iter().map(f32::from_bits).collect()
     }
 
     fn write(&self, buf: &mut Buffer, data: &[f32]) {
         assert_eq!(data.len(), buf.len);
         let words: Vec<u32> = data.iter().map(|x| x.to_bits()).collect();
-        self.sim.borrow().write(buf.addr, &words);
+        self.gpu.borrow_mut().write(buf.addr, &words);
     }
 
     fn copy(&self, dst: &mut Buffer, dst_offset: usize, src: &Buffer, src_offset: usize, len: usize) {
@@ -318,11 +408,25 @@ impl Device for Titania {
     }
 }
 
-/// Checks every operation against the CPU, the reference implementation.
+/// Checks every operation against the CPU, the reference implementation, on
+/// the ISA simulator and on the RTL simulator.
 #[cfg(test)]
 mod tests {
     use super::*;
     use titania_model::Cpu;
+
+    type Gpu = Titania<Box<dyn super::Gpu>>;
+
+    /// Every GPU to test on, skipping the RTL simulator if it was built
+    /// without Verilator.
+    fn gpus() -> Vec<fn() -> Gpu> {
+        let mut gpus: Vec<fn() -> Gpu> = vec![|| Titania::new(Box::new(Simulator::new()))];
+        match Rtlsim::new() {
+            Ok(_) => gpus.push(|| Titania::new(Box::new(Rtlsim::new().unwrap()))),
+            Err(e) => eprintln!("skipping the RTL simulator: {e}"),
+        }
+        gpus
+    }
 
     /// Pseudorandom numbers in `[-1, 1)`.
     fn numbers(n: usize, seed: u32) -> Vec<f32> {
@@ -346,14 +450,14 @@ mod tests {
     }
 
     /// A buffer on each device, holding the same numbers.
-    fn buffers(gpu: &Titania, n: usize, seed: u32) -> (Vec<f32>, Buffer) {
+    fn buffers(gpu: &Gpu, n: usize, seed: u32) -> (Vec<f32>, Buffer) {
         let values = numbers(n, seed);
         let mut buf = gpu.alloc(n);
         gpu.write(&mut buf, &values);
         (values, buf)
     }
 
-    fn assert_close(gpu: &Titania, actual: &Buffer, expected: &[f32]) {
+    fn assert_close(gpu: &Gpu, actual: &Buffer, expected: &[f32]) {
         let actual = gpu.read(actual);
         assert_eq!(actual.len(), expected.len());
         for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
@@ -364,105 +468,143 @@ mod tests {
 
     #[test]
     fn elementwise() {
-        let gpu = Titania::new();
-        let n = 300;
-        let (mut cpu_x, mut x) = buffers(&gpu, n, 1);
-        let (cpu_y, y) = buffers(&gpu, n, 2);
-        Cpu.add(&mut cpu_x, &cpu_y);
-        gpu.add(&mut x, &y);
-        assert_close(&gpu, &x, &cpu_x);
+        for new in gpus() {
+            let gpu = new();
+            let n = 300;
+            let (mut cpu_x, mut x) = buffers(&gpu, n, 1);
+            let (cpu_y, y) = buffers(&gpu, n, 2);
+            Cpu.add(&mut cpu_x, &cpu_y);
+            gpu.add(&mut x, &y);
+            assert_close(&gpu, &x, &cpu_x);
 
-        Cpu.silu_mul(&mut cpu_x, &cpu_y);
-        gpu.silu_mul(&mut x, &y);
-        assert_close(&gpu, &x, &cpu_x);
+            Cpu.silu_mul(&mut cpu_x, &cpu_y);
+            gpu.silu_mul(&mut x, &y);
+            assert_close(&gpu, &x, &cpu_x);
 
-        let (mut cpu_dst, mut dst) = buffers(&gpu, n + 10, 3);
-        Cpu.copy(&mut cpu_dst, 7, &cpu_x, 5, n - 5);
-        gpu.copy(&mut dst, 7, &x, 5, n - 5);
-        assert_close(&gpu, &dst, &cpu_dst);
+            let (mut cpu_dst, mut dst) = buffers(&gpu, n + 10, 3);
+            Cpu.copy(&mut cpu_dst, 7, &cpu_x, 5, n - 5);
+            gpu.copy(&mut dst, 7, &x, 5, n - 5);
+            assert_close(&gpu, &dst, &cpu_dst);
+        }
     }
 
     #[test]
     fn resize() {
-        let gpu = Titania::new();
-        let (mut cpu_x, mut x) = buffers(&gpu, 300, 1);
-        let (cpu_y, y) = buffers(&gpu, 100, 2);
-        Cpu.resize(&mut cpu_x, 100);
-        gpu.resize(&mut x, 100);
-        Cpu.add(&mut cpu_x, &cpu_y);
-        gpu.add(&mut x, &y);
-        assert_close(&gpu, &x, &cpu_x);
-        Cpu.resize(&mut cpu_x, 300);
-        gpu.resize(&mut x, 300);
-        assert_eq!(gpu.read(&x).len(), 300);
+        for new in gpus() {
+            let gpu = new();
+            let (mut cpu_x, mut x) = buffers(&gpu, 300, 1);
+            let (cpu_y, y) = buffers(&gpu, 100, 2);
+            Cpu.resize(&mut cpu_x, 100);
+            gpu.resize(&mut x, 100);
+            Cpu.add(&mut cpu_x, &cpu_y);
+            gpu.add(&mut x, &y);
+            assert_close(&gpu, &x, &cpu_x);
+            Cpu.resize(&mut cpu_x, 300);
+            gpu.resize(&mut x, 300);
+            assert_eq!(gpu.read(&x).len(), 300);
+        }
     }
 
     #[test]
     fn embed() {
-        let gpu = Titania::new();
-        let table = tensor(&[10, 128], 4);
-        let tokens = [3, 9, 0];
-        let (mut cpu_out, mut out) = buffers(&gpu, 3 * 128, 5);
-        Cpu.embed(&mut cpu_out, &table, &tokens);
-        let table = gpu.upload(table);
-        gpu.embed(&mut out, &table, &tokens);
-        assert_close(&gpu, &out, &cpu_out);
+        for new in gpus() {
+            let gpu = new();
+            let table = tensor(&[10, 128], 4);
+            let tokens = [3, 9, 0];
+            let (mut cpu_out, mut out) = buffers(&gpu, 3 * 128, 5);
+            Cpu.embed(&mut cpu_out, &table, &tokens);
+            let table = gpu.upload(table);
+            gpu.embed(&mut out, &table, &tokens);
+            assert_close(&gpu, &out, &cpu_out);
+        }
     }
 
     /// Batches of one token, a partial tile, whole tiles, and whole tiles
     /// with a remainder.
     #[test]
     fn matmul() {
-        for (rows, cols, n) in [(24, 256, 1), (5, 64, 3), (9, 384, 16), (24, 128, 19)] {
-            let gpu = Titania::new();
-            let w = tensor(&[rows, cols], 6);
-            let (cpu_x, x) = buffers(&gpu, n * cols, 7);
-            let (mut cpu_out, mut out) = buffers(&gpu, n * rows, 8);
-            Cpu.matmul(&mut cpu_out, &w, &cpu_x);
-            let w = gpu.upload(w);
-            gpu.matmul(&mut out, &w, &x);
-            assert_close(&gpu, &out, &cpu_out);
+        for new in gpus() {
+            for (rows, cols, n) in [(24, 256, 1), (5, 64, 3), (9, 384, 16), (24, 128, 19)] {
+                let gpu = new();
+                let w = tensor(&[rows, cols], 6);
+                let (cpu_x, x) = buffers(&gpu, n * cols, 7);
+                let (mut cpu_out, mut out) = buffers(&gpu, n * rows, 8);
+                Cpu.matmul(&mut cpu_out, &w, &cpu_x);
+                let w = gpu.upload(w);
+                gpu.matmul(&mut out, &w, &x);
+                assert_close(&gpu, &out, &cpu_out);
+            }
         }
     }
 
     #[test]
     fn rmsnorm() {
-        for (rows, dim) in [(3, 128), (1, 1024), (9, 64)] {
-            let gpu = Titania::new();
-            let weight = tensor(&[dim], 9);
-            let (mut cpu_x, mut x) = buffers(&gpu, rows * dim, 10);
-            Cpu.rmsnorm(&mut cpu_x, &weight, 1e-6);
-            let weight = gpu.upload(weight);
-            gpu.rmsnorm(&mut x, &weight, 1e-6);
-            assert_close(&gpu, &x, &cpu_x);
+        for new in gpus() {
+            for (rows, dim) in [(3, 128), (1, 1024), (9, 64)] {
+                let gpu = new();
+                let weight = tensor(&[dim], 9);
+                let (mut cpu_x, mut x) = buffers(&gpu, rows * dim, 10);
+                Cpu.rmsnorm(&mut cpu_x, &weight, 1e-6);
+                let weight = gpu.upload(weight);
+                gpu.rmsnorm(&mut x, &weight, 1e-6);
+                assert_close(&gpu, &x, &cpu_x);
+            }
         }
     }
 
     #[test]
     fn rope() {
-        for n in [1, 3] {
-            let gpu = Titania::new();
-            let (mut cpu_x, mut x) = buffers(&gpu, n * 4 * 128, 11);
-            let (cpu_table, table) = buffers(&gpu, 40 * 128, 16);
-            Cpu.rope(&mut cpu_x, &cpu_table, 37, 4, 128);
-            gpu.rope(&mut x, &table, 37, 4, 128);
-            assert_close(&gpu, &x, &cpu_x);
+        for new in gpus() {
+            for n in [1, 3] {
+                let gpu = new();
+                let (mut cpu_x, mut x) = buffers(&gpu, n * 4 * 128, 11);
+                let (cpu_table, table) = buffers(&gpu, 40 * 128, 16);
+                Cpu.rope(&mut cpu_x, &cpu_table, 37, 4, 128);
+                gpu.rope(&mut x, &table, 37, 4, 128);
+                assert_close(&gpu, &x, &cpu_x);
+            }
         }
+    }
+
+    /// How fast the RTL simulator runs a model-sized matrix-vector product:
+    /// `cargo test -p titania-runtime --release -- --ignored --nocapture speed`.
+    #[test]
+    #[ignore]
+    fn rtl_speed() {
+        let rtl = Rtlsim::new().unwrap();
+        let activity = rtl.activity();
+        let gpu: Gpu = Titania::new(Box::new(rtl));
+        let (rows, cols) = (1024, 1024);
+        let w = gpu.upload(tensor(&[rows, cols], 6));
+        let (_, x) = buffers(&gpu, cols, 7);
+        let mut out = gpu.alloc(rows);
+        let start = std::time::Instant::now();
+        gpu.matmul(&mut out, &w, &x);
+        let elapsed = start.elapsed().as_secs_f64();
+        let (cycles, instructions) = (activity.cycles(), activity.instructions());
+        println!(
+            "matmul {rows}×{cols}: {cycles} cycles, {instructions} instructions, {elapsed:.2}s: \
+             {:.0} kHz, {:.2} instructions/cycle",
+            cycles as f64 / elapsed / 1e3,
+            instructions as f64 / cycles as f64
+        );
     }
 
     #[test]
     fn attention() {
-        let (n_heads, head_dim, n_kv_heads, max_len) = (4, 64, 2, 40);
-        for (pos, n) in [(0, 1), (6, 1), (32, 1), (39, 1), (0, 5), (30, 10)] {
-            let gpu = Titania::new();
-            let kv_len = max_len * n_kv_heads * head_dim;
-            let (cpu_q, q) = buffers(&gpu, n * n_heads * head_dim, 12);
-            let (cpu_k, k) = buffers(&gpu, kv_len, 13);
-            let (cpu_v, v) = buffers(&gpu, kv_len, 14);
-            let (mut cpu_out, mut out) = buffers(&gpu, n * n_heads * head_dim, 15);
-            Cpu.attention(&mut cpu_out, &cpu_q, &cpu_k, &cpu_v, pos, n_heads, head_dim, n_kv_heads);
-            gpu.attention(&mut out, &q, &k, &v, pos, n_heads, head_dim, n_kv_heads);
-            assert_close(&gpu, &out, &cpu_out);
+        for new in gpus() {
+            let (n_heads, head_dim, n_kv_heads, max_len) = (4, 64, 2, 40);
+            for (pos, n) in [(0, 1), (6, 1), (32, 1), (39, 1), (0, 5), (30, 10)] {
+                let gpu = new();
+                let kv_len = max_len * n_kv_heads * head_dim;
+                let (cpu_q, q) = buffers(&gpu, n * n_heads * head_dim, 12);
+                let (cpu_k, k) = buffers(&gpu, kv_len, 13);
+                let (cpu_v, v) = buffers(&gpu, kv_len, 14);
+                let (mut cpu_out, mut out) = buffers(&gpu, n * n_heads * head_dim, 15);
+                Cpu.attention(&mut cpu_out, &cpu_q, &cpu_k, &cpu_v, pos, n_heads, head_dim, n_kv_heads);
+                gpu.attention(&mut out, &q, &k, &v, pos, n_heads, head_dim, n_kv_heads);
+                assert_close(&gpu, &out, &cpu_out);
+            }
         }
     }
 }
