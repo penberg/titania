@@ -12,4 +12,4 @@ pub mod kernels;
 
 pub use builder::{Builder, Cond, Operand, Pred, Value};
 pub use insn::{Insn, Instruction};
-pub use kernels::Kernel;
+pub use kernels::{Kernel, Kernels, Op};

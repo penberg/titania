@@ -5,11 +5,15 @@
 //! in order. Buffers are passed by their global memory address; activations
 //! are `f32`, and weights are bf16.
 
+use std::{cell::RefCell, collections::HashMap, fmt, sync::Arc};
+
 use crate::{Builder, Cond, insn::Instruction};
 
 /// A compiled kernel, with the launch geometry it was compiled for.
 #[derive(Debug)]
 pub struct Kernel {
+    /// The operation the kernel computes, with its shape.
+    pub name: String,
     pub instructions: Vec<Instruction>,
     /// The instructions, encoded.
     pub program: Vec<u64>,
@@ -31,9 +35,85 @@ impl Kernel {
     }
 }
 
+/// An operation, specialized to its shapes: what a kernel is compiled for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Op {
+    Copy(usize),
+    Embed(usize),
+    Matmul { rows: usize, cols: usize, n: usize },
+    Add(usize),
+    Rmsnorm { rows: usize, dim: usize, eps: u32 },
+    Rope { n_heads: usize, head_dim: usize, n: usize },
+    Attention { n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize, n: usize },
+    SiluMul(usize),
+}
+
+impl Op {
+    pub fn compile(self) -> Kernel {
+        let kernel = match self {
+            Op::Copy(n) => copy(n),
+            Op::Embed(dim) => embed(dim),
+            Op::Matmul { rows, cols, n } => matmul(rows, cols, n),
+            Op::Add(n) => add(n),
+            Op::Rmsnorm { rows, dim, eps } => rmsnorm(rows, dim, f32::from_bits(eps)),
+            Op::Rope { n_heads, head_dim, n } => rope(n_heads, head_dim, n),
+            Op::Attention { n_heads, head_dim, n_kv_heads, max_len, n } => {
+                attention(n_heads, head_dim, n_kv_heads, max_len, n)
+            }
+            Op::SiluMul(n) => silu_mul(n),
+        };
+        Kernel { name: self.to_string(), ..kernel }
+    }
+}
+
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Op::Copy(n) => write!(f, "copy {n}"),
+            Op::Embed(dim) => write!(f, "embed {dim}"),
+            Op::Matmul { rows, cols, n } => write!(f, "matmul {rows}×{cols}{}", tokens(*n)),
+            Op::Add(n) => write!(f, "add {n}"),
+            Op::Rmsnorm { rows, dim, .. } => write!(f, "rmsnorm {rows}×{dim}"),
+            Op::Rope { n_heads, head_dim, n } => write!(f, "rope {n_heads}×{head_dim}{}", tokens(*n)),
+            Op::Attention { n_heads, head_dim, n, .. } => {
+                write!(f, "attention {n_heads}×{head_dim}{}", tokens(*n))
+            }
+            Op::SiluMul(n) => write!(f, "silu_mul {n}"),
+        }
+    }
+}
+
+/// How many tokens an operation runs at once, when more than one.
+fn tokens(n: usize) -> String {
+    if n > 1 { format!(" · {n} tokens") } else { String::new() }
+}
+
+/// The kernels compiled so far, by operation and shape: each is compiled
+/// the first time it is asked for.
+#[derive(Default)]
+pub struct Kernels {
+    compiled: RefCell<HashMap<Op, Arc<Kernel>>>,
+}
+
+impl Kernels {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The kernel for `op`, compiling it if this is its first use.
+    pub fn get(&self, op: Op) -> Arc<Kernel> {
+        self.compiled
+            .borrow_mut()
+            .entry(op)
+            .or_insert_with(|| Arc::new(op.compile()))
+            .clone()
+    }
+}
+
 fn kernel(b: Builder, grid: [usize; 2], block: usize, shared: usize) -> Kernel {
     let instructions = b.finish().unwrap_or_else(|e| panic!("failed to compile kernel: {e}"));
     Kernel {
+        name: String::new(),
         program: instructions.iter().map(Instruction::encode).collect(),
         instructions,
         grid: grid.map(|n| n as u32),

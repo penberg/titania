@@ -7,128 +7,36 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
-    fmt,
-    rc::Rc,
     sync::{Arc, Mutex},
 };
 
-use titania_compiler::{
-    Kernel,
-    kernels::{self, TILE},
-};
+use titania_compiler::{Kernel, Kernels, Op, kernels::TILE};
 use titania_gpu::{Activity, Gpu, Launch};
 use titania_model::{Device, Tensor};
 
 /// A Titania GPU running the model.
 pub struct Titania<G: Gpu> {
     gpu: RefCell<G>,
-    /// Compiled kernels, by operation and shape.
-    kernels: RefCell<HashMap<Op, Rc<Compiled>>>,
+    kernels: Kernels,
     monitor: Arc<Monitor>,
 }
 
 /// What a [`Titania`] is running, for another thread to watch.
 pub struct Monitor {
-    kernel: Mutex<Option<Arc<KernelInfo>>>,
+    kernel: Mutex<Option<Arc<Kernel>>>,
     activity: Arc<Activity>,
 }
 
 impl Monitor {
     /// The kernel launched last: the one running, unless the GPU is idle.
-    pub fn kernel(&self) -> Option<Arc<KernelInfo>> {
+    pub fn kernel(&self) -> Option<Arc<Kernel>> {
         self.kernel.lock().unwrap().clone()
     }
 
-    /// What the simulator is doing.
+    /// What the GPU is doing.
     pub fn activity(&self) -> &Activity {
         &self.activity
     }
-}
-
-/// A compiled kernel, as a [`Monitor`] shows it.
-pub struct KernelInfo {
-    /// The operation the kernel computes, with its shape.
-    pub name: String,
-    /// Blocks along x and y.
-    pub grid: [u32; 2],
-    pub block: u32,
-    /// Bytes of shared memory per block.
-    pub shared: u32,
-    /// The kernel's instructions in assembly syntax, by PC.
-    pub listing: Vec<String>,
-}
-
-/// A kernel compiled for an operation.
-struct Compiled {
-    kernel: Kernel,
-    info: Arc<KernelInfo>,
-}
-
-impl Compiled {
-    fn new(op: Op) -> Self {
-        let kernel = op.compile();
-        let info = Arc::new(KernelInfo {
-            name: op.to_string(),
-            grid: kernel.grid,
-            block: kernel.block,
-            shared: kernel.shared,
-            listing: kernel.instructions.iter().map(ToString::to_string).collect(),
-        });
-        Self { kernel, info }
-    }
-}
-
-/// An operation, specialized to its shapes: what a kernel is compiled for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Op {
-    Copy(usize),
-    Embed(usize),
-    Matmul { rows: usize, cols: usize, n: usize },
-    Add(usize),
-    Rmsnorm { rows: usize, dim: usize, eps: u32 },
-    Rope { n_heads: usize, head_dim: usize, n: usize },
-    Attention { n_heads: usize, head_dim: usize, n_kv_heads: usize, max_len: usize, n: usize },
-    SiluMul(usize),
-}
-
-impl Op {
-    fn compile(self) -> Kernel {
-        match self {
-            Op::Copy(n) => kernels::copy(n),
-            Op::Embed(dim) => kernels::embed(dim),
-            Op::Matmul { rows, cols, n } => kernels::matmul(rows, cols, n),
-            Op::Add(n) => kernels::add(n),
-            Op::Rmsnorm { rows, dim, eps } => kernels::rmsnorm(rows, dim, f32::from_bits(eps)),
-            Op::Rope { n_heads, head_dim, n } => kernels::rope(n_heads, head_dim, n),
-            Op::Attention { n_heads, head_dim, n_kv_heads, max_len, n } => {
-                kernels::attention(n_heads, head_dim, n_kv_heads, max_len, n)
-            }
-            Op::SiluMul(n) => kernels::silu_mul(n),
-        }
-    }
-}
-
-impl fmt::Display for Op {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Op::Copy(n) => write!(f, "copy {n}"),
-            Op::Embed(dim) => write!(f, "embed {dim}"),
-            Op::Matmul { rows, cols, n } => write!(f, "matmul {rows}×{cols}{}", tokens(*n)),
-            Op::Add(n) => write!(f, "add {n}"),
-            Op::Rmsnorm { rows, dim, .. } => write!(f, "rmsnorm {rows}×{dim}"),
-            Op::Rope { n_heads, head_dim, n } => write!(f, "rope {n_heads}×{head_dim}{}", tokens(*n)),
-            Op::Attention { n_heads, head_dim, n, .. } => {
-                write!(f, "attention {n_heads}×{head_dim}{}", tokens(*n))
-            }
-            Op::SiluMul(n) => write!(f, "silu_mul {n}"),
-        }
-    }
-}
-
-/// How many tokens an operation runs at once, when more than one.
-fn tokens(n: usize) -> String {
-    if n > 1 { format!(" · {n} tokens") } else { String::new() }
 }
 
 /// A buffer of `f32` activations in global memory.
@@ -153,7 +61,7 @@ impl<G: Gpu> Titania<G> {
         });
         Self {
             gpu: RefCell::new(gpu),
-            kernels: RefCell::default(),
+            kernels: Kernels::new(),
             monitor,
         }
     }
@@ -165,14 +73,8 @@ impl<G: Gpu> Titania<G> {
 
     /// Runs an operation, compiling it first if this is its first use.
     fn run(&self, op: Op, params: &[u32]) {
-        let compiled = self
-            .kernels
-            .borrow_mut()
-            .entry(op)
-            .or_insert_with(|| Rc::new(Compiled::new(op)))
-            .clone();
-        *self.monitor.kernel.lock().unwrap() = Some(compiled.info.clone());
-        let kernel = &compiled.kernel;
+        let kernel = self.kernels.get(op);
+        *self.monitor.kernel.lock().unwrap() = Some(kernel.clone());
         let launch = Launch {
             program: &kernel.program,
             grid: kernel.grid,
@@ -181,7 +83,7 @@ impl<G: Gpu> Titania<G> {
             params,
         };
         if let Err(e) = self.gpu.borrow_mut().launch(&launch) {
-            panic!("{op:?} failed: {e}\n{}", kernel.disassemble());
+            panic!("{} failed: {e}\n{}", kernel.name, kernel.disassemble());
         }
     }
 

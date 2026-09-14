@@ -87,14 +87,14 @@ impl Panel {
         lines.push(tui::boxed(tui::spread(vec![span(position)], vec![span(stats).dark_grey()], inner), columns));
 
         // The instructions around the one the sampled warp was at.
-        let listing = LISTING.min(kernel.listing.len()).min(rows.saturating_sub(5));
+        let listing = LISTING.min(kernel.instructions.len()).min(rows.saturating_sub(5));
         if listing >= 3 {
             lines.push(tui::boxed(Line::new(), columns));
             let first = sample
                 .pc
                 .saturating_sub(listing / 2)
-                .min(kernel.listing.len() - listing);
-            for (pc, text) in kernel.listing.iter().enumerate().skip(first).take(listing) {
+                .min(kernel.instructions.len() - listing);
+            for (pc, text) in kernel.instructions.iter().enumerate().skip(first).take(listing) {
                 let line = if pc == sample.pc {
                     vec![span("▶ ").with(logo::green()), span(format!("{pc:4}  {text}")).bold()]
                 } else {
