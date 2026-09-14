@@ -4,7 +4,7 @@ use std::{
 };
 
 use crossterm::style::Stylize;
-use titania_runtime::Monitor;
+use titania_model::Monitor;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{

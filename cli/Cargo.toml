@@ -12,7 +12,6 @@ argh = "0.1.19"
 crossterm = "0.29.0"
 dirs = "7.0.0"
 titania-model = { version = "0.1.0", path = "../model" }
-titania-runtime = { version = "0.1.0", path = "../runtime" }
 titania-simulator = { version = "0.1.0", path = "../simulator" }
 serde_json = "1.0.151"
 ureq = "3.4.1"

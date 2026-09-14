@@ -12,7 +12,8 @@ use std::{
 
 use titania_compiler::{Kernel, Kernels, Op, kernels::TILE};
 use titania_gpu::{Activity, Gpu, Launch};
-use titania_model::{Device, Tensor};
+
+use crate::{Device, Tensor};
 
 /// A Titania GPU running the model.
 pub struct Titania<G: Gpu> {
@@ -221,10 +222,10 @@ impl<G: Gpu> Device for Titania<G> {
 /// Checks every operation against the CPU, the reference implementation.
 #[cfg(test)]
 mod tests {
-    use titania_model::Cpu;
     use titania_simulator::Simulator;
 
     use super::*;
+    use crate::Cpu;
 
     /// Pseudorandom numbers in `[-1, 1)`.
     fn numbers(n: usize, seed: u32) -> Vec<f32> {

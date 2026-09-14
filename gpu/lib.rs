@@ -3,7 +3,7 @@
 //! Whatever executes Titania programs, the ISA simulator, an RTL simulator
 //! of the GPU design, or the GPU itself, is a [`Gpu`] to the host: global
 //! memory to allocate, write, and read, and kernels to launch (§5 of the
-//! architecture manual). The runtime runs the model on any of them.
+//! architecture manual). The model runs on any of them.
 
 use std::{
     fmt,

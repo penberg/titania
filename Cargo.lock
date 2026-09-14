@@ -714,7 +714,6 @@ dependencies = [
  "dirs",
  "serde_json",
  "titania-model",
- "titania-runtime",
  "titania-simulator",
  "unicode-width",
  "ureq",
@@ -736,15 +735,8 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "titania-runtime"
-version = "0.1.0"
-dependencies = [
  "titania-compiler",
  "titania-gpu",
- "titania-model",
  "titania-simulator",
 ]
 

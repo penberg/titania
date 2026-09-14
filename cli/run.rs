@@ -15,8 +15,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     style::Stylize,
 };
-use titania_model::{Chat, Cpu, Model, Sampler, Tokenizer};
-use titania_runtime::{Monitor, Titania};
+use titania_model::{Chat, Cpu, Model, Monitor, Sampler, Titania, Tokenizer};
 use titania_simulator::Simulator;
 
 use crate::{

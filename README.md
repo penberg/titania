@@ -96,8 +96,8 @@ Titania is made up of five layers:
 |-------|------------|-------|
 | **Model** | A decoder-only transformer, written as GPU kernels | [`model/`](model) |
 | **Compiler** | Lowers the model's kernels to Titania ISA programs | [`compiler/`](compiler) |
-| **ISA** | The contract between software and hardware | [`docs/architecture-reference.md`](docs/architecture-reference.md) |
-| **ISA Simulator** | The reference implementation of the ISA | [`simulator/`](simulator), [`runtime/`](runtime) |
+| **ISA** | The contract between software and hardware | [`docs/architecture-reference.md`](docs/architecture-reference.md), [`gpu/`](gpu) |
+| **ISA Simulator** | The reference implementation of the ISA | [`simulator/`](simulator) |
 | **Hardware** | The GPU itself, as an RTL design | Planned |
 
 ### 🧠 Model
