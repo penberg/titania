@@ -5,15 +5,13 @@
 //! executes an instruction for all of its threads at once, as the hardware
 //! does, and blocks run in parallel on the host's cores.
 
-use std::{
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering::Relaxed},
 };
 
 use rayon::prelude::*;
+use titania_gpu::{Activity, Error, Gpu, Launch, Sample};
 
 /// Number of threads in a warp.
 const WARP_SIZE: u32 = 32;
@@ -187,96 +185,6 @@ pub struct Simulator {
     simd: bool,
 }
 
-/// What a simulator is doing, updated as it runs so that another thread can
-/// watch it.
-///
-/// Keeping it up to date costs next to nothing: a block adds up the
-/// instructions it executes and publishes them when it finishes, and records
-/// where a warp is only every `SAMPLE_INTERVAL` instructions.
-#[derive(Default)]
-pub struct Activity {
-    launches: AtomicU64,
-    instructions: AtomicU64,
-    /// A [`Sample`], packed into one word so that it is read whole.
-    sample: AtomicU64,
-}
-
-/// Where a warp was when sampled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sample {
-    pub block: u32,
-    pub warp: u32,
-    pub pc: usize,
-}
-
-impl Activity {
-    /// Kernels launched so far.
-    pub fn launches(&self) -> u64 {
-        self.launches.load(Relaxed)
-    }
-
-    /// Instructions executed so far by blocks that have finished, counting
-    /// each instruction once per warp that executes it.
-    pub fn instructions(&self) -> u64 {
-        self.instructions.load(Relaxed)
-    }
-
-    /// Where a warp of the kernel launched last was recently.
-    pub fn sample(&self) -> Sample {
-        let packed = self.sample.load(Relaxed);
-        Sample {
-            block: (packed >> 32) as u32,
-            warp: (packed >> 24 & 0xff) as u32,
-            pc: (packed & 0xff_ffff) as usize,
-        }
-    }
-
-    fn record(&self, sample: Sample) {
-        let packed = (sample.block as u64) << 32 | (sample.warp as u64) << 24 | (sample.pc as u64 & 0xff_ffff);
-        self.sample.store(packed, Relaxed);
-    }
-}
-
-/// A kernel launch (§5).
-pub struct Launch<'a> {
-    /// The kernel's encoded instructions.
-    pub program: &'a [u64],
-    /// Blocks along x and y.
-    pub grid: [u32; 2],
-    pub block: u32,
-    /// Bytes of shared memory per block.
-    pub shared: u32,
-    pub params: &'a [u32],
-}
-
-/// An error that stops a launch (§6).
-#[derive(Debug)]
-pub enum Error {
-    InvalidLaunch(&'static str),
-    InvalidInstruction { pc: usize, word: u64 },
-    PcOutOfRange { pc: usize },
-    DivergentBranch { pc: usize },
-    DivergentBarrier { pc: usize },
-    Memory { pc: usize, space: &'static str, addr: u32 },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::InvalidLaunch(reason) => write!(f, "invalid launch: {reason}"),
-            Error::InvalidInstruction { pc, word } => write!(f, "instruction {pc}: invalid instruction {word:#018x}"),
-            Error::PcOutOfRange { pc } => write!(f, "PC {pc} is outside the program"),
-            Error::DivergentBranch { pc } => write!(f, "instruction {pc}: divergent branch"),
-            Error::DivergentBarrier { pc } => write!(f, "instruction {pc}: divergent barrier"),
-            Error::Memory { pc, space, addr } => {
-                write!(f, "instruction {pc}: invalid {space} memory access at {addr:#x}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
 impl Default for Simulator {
     fn default() -> Self {
         Self::new()
@@ -342,8 +250,7 @@ impl Simulator {
             .map(|(pc, &word)| decode(word).ok_or(Error::InvalidInstruction { pc, word }))
             .collect::<Result<Vec<_>, _>>()?;
 
-        self.activity.launches.fetch_add(1, Relaxed);
-        self.activity.record(Sample { block: 0, warp: 0, pc: 0 });
+        self.activity.launched();
         (0..width * height).into_par_iter().try_for_each(|id| {
             Block {
                 memory: &self.memory,
@@ -411,6 +318,30 @@ enum Src<'a> {
 /// bounds check.
 fn reg(reg: u8) -> usize {
     reg as usize & (NUM_REGS - 1)
+}
+
+/// The ISA simulator is the reference [`Gpu`]: the one the hardware is
+/// checked against.
+impl Gpu for Simulator {
+    fn activity(&self) -> Arc<Activity> {
+        Simulator::activity(self)
+    }
+
+    fn alloc(&mut self, bytes: usize) -> u32 {
+        Simulator::alloc(self, bytes)
+    }
+
+    fn write(&mut self, addr: u32, words: &[u32]) {
+        Simulator::write(self, addr, words)
+    }
+
+    fn read(&self, addr: u32, len: usize) -> Vec<u32> {
+        Simulator::read(self, addr, len)
+    }
+
+    fn launch(&mut self, launch: &Launch) -> Result<(), Error> {
+        Simulator::launch(self, launch)
+    }
 }
 
 impl Warp {
@@ -593,7 +524,7 @@ impl Block<'_> {
                 }
             }
             if warps.iter().all(|warp| warp.state == State::Finished) {
-                self.activity.instructions.fetch_add(executed, Relaxed);
+                self.activity.executed(executed);
                 return Ok(());
             }
             for warp in &mut warps {

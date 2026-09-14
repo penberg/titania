@@ -17,6 +17,7 @@ use crossterm::{
 };
 use titania_model::{Chat, Cpu, Model, Sampler, Tokenizer};
 use titania_runtime::{Monitor, Titania};
+use titania_simulator::Simulator;
 
 use crate::{
     fetch::{self, Progress},
@@ -121,7 +122,7 @@ fn work(
     match device {
         Device::Cpu => serve(dir, Cpu, requests, replies, stop),
         Device::Sim => {
-            let gpu = Titania::new();
+            let gpu = Titania::new(Simulator::new());
             let _ = replies.send(Reply::Monitor(gpu.monitor()));
             serve(dir, gpu, requests, replies, stop)
         }

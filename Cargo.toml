@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "compiler", "model", "runtime", "simulator"]
+members = ["cli", "compiler", "gpu", "model", "runtime", "simulator"]
 resolver = "3"
 
 # The forward pass is unusably slow unoptimized, on the CPU and in the
