@@ -5,9 +5,7 @@
 //! in order. Buffers are passed by their global memory address; activations
 //! are `f32`, and weights are bf16.
 
-use crate::insn::Instruction;
-
-use crate::{Builder, Cond};
+use crate::{Builder, Cond, insn::Instruction};
 
 /// A compiled kernel, with the launch geometry it was compiled for.
 #[derive(Debug)]

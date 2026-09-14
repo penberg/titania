@@ -1,16 +1,20 @@
-use std::io::{self, Stdout, Write};
-use std::mem;
-use std::ops::Range;
-use std::sync::OnceLock;
-
-use crossterm::cursor::{MoveToColumn, MoveUp};
-use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+use std::{
+    io::{self, Stdout, Write},
+    mem,
+    ops::Range,
+    sync::OnceLock,
 };
-use crossterm::style::{Color, Print, PrintStyledContent, StyledContent, Stylize};
-use crossterm::terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate};
-use crossterm::{execute, queue};
+
+use crossterm::{
+    cursor::{MoveToColumn, MoveUp},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
+    execute, queue,
+    style::{Color, Print, PrintStyledContent, StyledContent, Stylize},
+    terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// A line of styled text.

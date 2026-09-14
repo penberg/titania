@@ -1,12 +1,16 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crossterm::style::Stylize;
 use titania_runtime::Monitor;
 use unicode_width::UnicodeWidthStr;
 
-use crate::logo;
-use crate::tui::{self, Line, span};
+use crate::{
+    logo,
+    tui::{self, Line, span},
+};
 
 /// Most lines of disassembly the panel shows.
 const LISTING: usize = 7;

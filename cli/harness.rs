@@ -1,6 +1,4 @@
-use std::error::Error;
-use std::ops::ControlFlow;
-use std::process::Command;
+use std::{error::Error, ops::ControlFlow, process::Command};
 
 use titania_model::{Chat, Device, ToolCall};
 

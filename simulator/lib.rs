@@ -5,9 +5,13 @@
 //! executes an instruction for all of its threads at once, as the hardware
 //! does, and blocks run in parallel on the host's cores.
 
-use std::fmt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
+    },
+};
 
 use rayon::prelude::*;
 

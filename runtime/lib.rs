@@ -4,14 +4,18 @@
 //! one, the first time it is used with a given shape, into a Titania kernel,
 //! and launching it. A [`Monitor`] watches it do so from another thread.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fmt;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fmt,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
-use titania_compiler::kernels::TILE;
-use titania_compiler::{Kernel, kernels};
+use titania_compiler::{
+    Kernel,
+    kernels::{self, TILE},
+};
 use titania_model::{Device, Tensor};
 use titania_simulator::{Activity, Launch, Simulator};
 
@@ -321,8 +325,9 @@ impl Device for Titania {
 /// Checks every operation against the CPU, the reference implementation.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use titania_model::Cpu;
+
+    use super::*;
 
     /// Pseudorandom numbers in `[-1, 1)`.
     fn numbers(n: usize, seed: u32) -> Vec<f32> {

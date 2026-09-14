@@ -2,12 +2,12 @@
 //! allocates physical registers with a linear scan, and resolves branch
 //! targets.
 
-use std::collections::HashMap;
-use std::hash::Hash;
+use std::{collections::HashMap, hash::Hash};
 
-use crate::insn::{Format, Instruction, NUM_PREDS, NUM_REGS};
-
-use crate::builder::{Item, VInst, Value};
+use crate::{
+    builder::{Item, VInst, Value},
+    insn::{Format, Instruction, NUM_PREDS, NUM_REGS},
+};
 
 pub fn generate(items: &[Item]) -> Result<Vec<Instruction>, String> {
     // Number the instructions, and find each loop's extent and each label's

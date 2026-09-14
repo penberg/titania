@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
+use std::{collections::HashMap, fs, path::Path};
 
 use fancy_regex::Regex;
 use serde_json::Value;

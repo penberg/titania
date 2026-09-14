@@ -1,8 +1,10 @@
-use std::error::Error;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::{
+    error::Error,
+    fs::{self, File},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crate::models::{MODELS, Model};
 

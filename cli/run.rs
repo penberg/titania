@@ -1,24 +1,31 @@
-use std::error::Error;
-use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::{
+    error::Error,
+    ops::ControlFlow,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
+    thread,
+    time::{Duration, Instant, SystemTime},
+};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::style::Stylize;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    style::Stylize,
+};
 use titania_model::{Chat, Cpu, Model, Sampler, Tokenizer};
 use titania_runtime::{Monitor, Titania};
 
-use crate::fetch::{self, Progress};
-use crate::harness::{self, Harness};
-use crate::logo;
-use crate::models;
-use crate::monitor::Panel;
-use crate::opts::Device;
-use crate::tui::{self, Input, Line, Screen, span};
+use crate::{
+    fetch::{self, Progress},
+    harness::{self, Harness},
+    logo, models,
+    monitor::Panel,
+    opts::Device,
+    tui::{self, Input, Line, Screen, span},
+};
 
 /// Longest conversation, in tokens, the key/value cache has room for.
 const MAX_LEN: usize = 4096;

@@ -1,6 +1,7 @@
-use crate::insn::{Insn, Instruction, SR_CTAID_X, SR_CTAID_Y, SR_NCTAID_X, SR_NCTAID_Y, SR_NTID, SR_TID};
-
-use crate::codegen;
+use crate::{
+    codegen,
+    insn::{Insn, Instruction, SR_CTAID_X, SR_CTAID_Y, SR_NCTAID_X, SR_NCTAID_Y, SR_NTID, SR_TID},
+};
 
 /// A virtual register holding a 32-bit value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
