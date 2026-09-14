@@ -23,7 +23,7 @@ pub struct RunCmd {
     #[argh(positional, default = "models::DEFAULT.to_string()")]
     pub model: String,
 
-    /// device to run the model on: cpu (default), or sim for the Titania ISA
+    /// device to run the model on: cpu (default), or isasim for the Titania ISA
     /// simulator
     #[argh(option, default = "Device::Cpu")]
     pub device: Device,
@@ -33,15 +33,15 @@ pub struct RunCmd {
 #[derive(Clone, Copy)]
 pub enum Device {
     Cpu,
-    Sim,
+    Isasim,
 }
 
 impl argh::FromArgValue for Device {
     fn from_arg_value(value: &str) -> Result<Self, String> {
         match value {
             "cpu" => Ok(Device::Cpu),
-            "sim" => Ok(Device::Sim),
-            _ => Err(format!("unknown device '{value}' (expected cpu or sim)")),
+            "isasim" => Ok(Device::Isasim),
+            _ => Err(format!("unknown device '{value}' (expected cpu or isasim)")),
         }
     }
 }

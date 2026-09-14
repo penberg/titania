@@ -16,7 +16,7 @@ use crossterm::{
     style::Stylize,
 };
 use titania_model::{Chat, Cpu, Model, Monitor, Sampler, Titania, Tokenizer};
-use titania_simulator::Simulator;
+use titania_isasim::Isasim;
 
 use crate::{
     fetch::{self, Progress},
@@ -120,8 +120,8 @@ fn work(
     let _ = replies.send(Reply::Fetched);
     match device {
         Device::Cpu => serve(dir, Cpu, requests, replies, stop),
-        Device::Sim => {
-            let gpu = Titania::new(Simulator::new());
+        Device::Isasim => {
+            let gpu = Titania::new(Isasim::new());
             let _ = replies.send(Reply::Monitor(gpu.monitor()));
             serve(dir, gpu, requests, replies, stop)
         }
@@ -455,7 +455,7 @@ impl App {
     fn header(&self) -> Vec<Line> {
         let device = match self.device {
             Device::Cpu => "CPU",
-            Device::Sim => "ISA simulator",
+            Device::Isasim => "ISA simulator",
         };
         let dir = match dirs::home_dir().and_then(|home| self.dir.strip_prefix(home).ok()) {
             Some(rest) => format!("~/{}", rest.display()),
@@ -582,7 +582,7 @@ impl App {
     fn footer(&self, columns: usize) -> Line {
         let device = match self.device {
             Device::Cpu => "cpu",
-            Device::Sim => "sim",
+            Device::Isasim => "isasim",
         };
         let mut left = format!("  {} · {device} · {}/{MAX_LEN} tokens", self.model, self.context);
         if let Some(speed) = self.speed {

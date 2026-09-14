@@ -15,4 +15,4 @@ titania-compiler = { version = "0.1.0", path = "../compiler" }
 titania-gpu = { version = "0.1.0", path = "../gpu" }
 
 [dev-dependencies]
-titania-simulator = { version = "0.1.0", path = "../simulator" }
+titania-isasim = { version = "0.1.0", path = "../isasim" }

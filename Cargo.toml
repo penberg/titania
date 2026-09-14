@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "compiler", "gpu", "model", "simulator"]
+members = ["cli", "compiler", "gpu", "isasim", "model"]
 resolver = "3"
 
 # The forward pass is unusably slow unoptimized, on the CPU and in the
@@ -7,5 +7,5 @@ resolver = "3"
 [profile.dev.package.titania-model]
 opt-level = 3
 
-[profile.dev.package.titania-simulator]
+[profile.dev.package.titania-isasim]
 opt-level = 3

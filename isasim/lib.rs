@@ -174,7 +174,7 @@ fn decode(word: u64) -> Option<Inst> {
 }
 
 /// A simulated Titania GPU with its global memory.
-pub struct Simulator {
+pub struct Isasim {
     /// Global memory, one word per element: every access is a whole,
     /// aligned word. Atomics let blocks run in parallel; relaxed ordering is
     /// enough because blocks never access the same location when one of them
@@ -185,13 +185,13 @@ pub struct Simulator {
     simd: bool,
 }
 
-impl Default for Simulator {
+impl Default for Isasim {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Simulator {
+impl Isasim {
     pub fn new() -> Self {
         Self {
             memory: Vec::new(),
@@ -322,25 +322,25 @@ fn reg(reg: u8) -> usize {
 
 /// The ISA simulator is the reference [`Gpu`]: the one the hardware is
 /// checked against.
-impl Gpu for Simulator {
+impl Gpu for Isasim {
     fn activity(&self) -> Arc<Activity> {
-        Simulator::activity(self)
+        Isasim::activity(self)
     }
 
     fn alloc(&mut self, bytes: usize) -> u32 {
-        Simulator::alloc(self, bytes)
+        Isasim::alloc(self, bytes)
     }
 
     fn write(&mut self, addr: u32, words: &[u32]) {
-        Simulator::write(self, addr, words)
+        Isasim::write(self, addr, words)
     }
 
     fn read(&self, addr: u32, len: usize) -> Vec<u32> {
-        Simulator::read(self, addr, len)
+        Isasim::read(self, addr, len)
     }
 
     fn launch(&mut self, launch: &Launch) -> Result<(), Error> {
-        Simulator::launch(self, launch)
+        Isasim::launch(self, launch)
     }
 }
 
@@ -457,7 +457,7 @@ fn map(a: &Row, b: &Row, c: &Row, f: impl Fn(u32, u32, u32) -> u32) -> Row {
 }
 
 /// [`map`], compiled for the vector extensions the host was found to have at
-/// run time (`Simulator::new` checks), so that it uses them even when the
+/// run time (`Isasim::new` checks), so that it uses them even when the
 /// build targets a baseline CPU: in particular, fused multiply-add stays a
 /// vector instruction rather than a call into the math library.
 #[cfg(target_arch = "x86_64")]
@@ -798,7 +798,7 @@ mod tests {
     /// warp, reduced with butterfly shuffles, to `out[tid]`.
     #[test]
     fn warp_sum() {
-        let mut sim = Simulator::new();
+        let mut sim = Isasim::new();
         let out = sim.alloc(64 * 4);
         let mut program = vec![inst(S2R, 1, 0, 0, Some(SR_TID)), inst(MOV, 2, 1, 0, None)];
         for offset in [16, 8, 4, 2, 1] {
@@ -821,7 +821,7 @@ mod tests {
     /// One thread per block writes `x + 10y` to `out[x + 4y]` in a 4×3 grid.
     #[test]
     fn grid_is_two_dimensional() {
-        let mut sim = Simulator::new();
+        let mut sim = Isasim::new();
         let out = sim.alloc(12 * 4);
         let program = [
             inst(S2R, 1, 0, 0, Some(SR_CTAID_X)),
@@ -845,7 +845,7 @@ mod tests {
 
     #[test]
     fn divergent_branch_is_an_error() {
-        let sim = Simulator::new();
+        let sim = Isasim::new();
         // Guarded by p0 rather than pt.
         let branch = inst(BRA, 0, 0, 0, Some(3)) & !(7 << 8);
         let program = [

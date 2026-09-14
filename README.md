@@ -62,7 +62,7 @@ titania run
 Or run it on the Titania ISA simulator instead of the CPU:
 
 ```console
-titania run --device sim
+titania run --device isasim
 ```
 
 The model has a `bash` tool, so asking it about the files or the system you
@@ -73,7 +73,7 @@ confirmation.
 
 ## Running on the Titania GPU
 
-`titania run --device sim` runs the same model on a simulated Titania GPU. Each
+`titania run --device isasim` runs the same model on a simulated Titania GPU. Each
 of the model's operations is compiled into a Titania kernel the first time it
 is used with a given shape, and the ISA simulator executes it instruction by
 instruction. While the model thinks, a panel shows the kernel running, where
@@ -81,7 +81,7 @@ one of its warps is in the disassembly, and how fast instructions are
 executing.
 
 <p align="center">
-  <img src=".github/assets/titania-run-sim.gif" alt="titania run --device sim: Qwen3-0.6B on the Titania ISA simulator. While it answers, a Titania GPU panel shows the running matvec kernel, its launch configuration, the instruction count, and the disassembly around a sampled warp's program counter.">
+  <img src=".github/assets/titania-run-sim.gif" alt="titania run --device isasim: Qwen3-0.6B on the Titania ISA simulator. While it answers, a Titania GPU panel shows the running matvec kernel, its launch configuration, the instruction count, and the disassembly around a sampled warp's program counter.">
 </p>
 
 <p align="center"><em>Sped up: on the simulator, the model generates about a token per second.</em></p>
@@ -97,7 +97,7 @@ Titania is made up of five layers:
 | **Model** | A decoder-only transformer, written as GPU kernels | [`model/`](model) |
 | **Compiler** | Lowers the model's kernels to Titania ISA programs | [`compiler/`](compiler) |
 | **ISA** | The contract between software and hardware | [`docs/architecture-reference.md`](docs/architecture-reference.md), [`gpu/`](gpu) |
-| **ISA Simulator** | The reference implementation of the ISA | [`simulator/`](simulator) |
+| **ISA Simulator** | The reference implementation of the ISA | [`isasim/`](isasim) |
 | **Hardware** | The GPU itself, as an RTL design | Planned |
 
 ### 🧠 Model
